@@ -18,6 +18,12 @@ cargo install --path .
 
 ## Usage
 
+```bash
+fqgrep -r 'GACGAGATTA' -a 'GACGTGATTA' --r1-fastq /data/testR1.fastq.gz  --r2-fastq /data/testR2.fastq.gz -o ./test_out -t 28
+```
+
+Help!
+
 ```
 fqgrep 0.1.0
 A small utility to "grep" a pair of gzipped FASTQ files, outputting the read pair if the sequence given matches either
