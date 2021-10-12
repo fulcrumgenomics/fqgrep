@@ -285,7 +285,7 @@ enum Matches {
 }
 
 /// A small utility to "grep" a pair of gzipped FASTQ files, outputting the read pair if the sequence
-/// given matches either.
+/// matches either the given ref sequence, the given alt sequence, or both.
 #[derive(StructOpt, Debug)]
 #[structopt(name = "fqgrep", global_setting(ColoredHelp), version = built_info::VERSION.as_str())]
 struct Opts {

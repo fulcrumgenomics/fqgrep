@@ -26,7 +26,8 @@ Help!
 
 ```
 fqgrep 0.1.0
-A small utility to "grep" a pair of gzipped FASTQ files, outputting the read pair if the sequence given matches either
+A small utility to "grep" a pair of gzipped FASTQ files, outputting the read pair if the sequence matches either the
+given ref sequence, the given alt sequence, or both
 
 USAGE:
     fqgrep [OPTIONS] --alt-search-sequence <alt-search-sequence> --output-dir <output-dir> --r1-fastq <r1-fastq> --r2-fastq <r2-fastq> --ref-search-sequence <ref-search-sequence>
