@@ -35,6 +35,17 @@ const REF_PREFIX: &str = "REF";
 const ALT_PREFIX: &str = "ALT";
 const BOTH_PREFIX: &str = "BOTH";
 
+/// Helper type to represent the accumlated reads and what match type they are.
+///
+/// `p` are ref reads
+/// `1` are alt reads
+/// `2` are reads that matched both
+type MatchedReads = (
+    (Vec<OwnedRecord>, Vec<OwnedRecord>),
+    (Vec<OwnedRecord>, Vec<OwnedRecord>),
+    (Vec<OwnedRecord>, Vec<OwnedRecord>),
+);
+
 lazy_static! {
     /// Return the number of cpus as a String
     pub static ref NUM_CPU: String = num_cpus::get().to_string();
@@ -369,11 +380,7 @@ fn main() -> Result<()> {
                 .filter(|(m, _)| *m != Matches::None)
                 .fold(
                     || ((vec![], vec![]), (vec![], vec![]), (vec![], vec![])),
-                    |(mut ref_reads, mut alt_reads, mut both_reads): (
-                        (Vec<OwnedRecord>, Vec<OwnedRecord>),
-                        (Vec<OwnedRecord>, Vec<OwnedRecord>),
-                        (Vec<OwnedRecord>, Vec<OwnedRecord>),
-                    ),
+                    |(mut ref_reads, mut alt_reads, mut both_reads): MatchedReads,
                      (match_type, (r1, r2)): (Matches, (OwnedRecord, OwnedRecord))| {
                         match match_type {
                             Matches::Ref => {
@@ -394,11 +401,7 @@ fn main() -> Result<()> {
                     },
                 )
                 .for_each(
-                    |(ref_reads, alt_reads, both_reads): (
-                        (Vec<OwnedRecord>, Vec<OwnedRecord>),
-                        (Vec<OwnedRecord>, Vec<OwnedRecord>),
-                        (Vec<OwnedRecord>, Vec<OwnedRecord>),
-                    )| {
+                    |(ref_reads, alt_reads, both_reads): MatchedReads| {
                         // Aquire lock to ensure R1 and R2 are enqueued at the same time
                         {
                             let _lock = ref_writer.lock.lock();
