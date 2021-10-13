@@ -366,8 +366,12 @@ fn main() -> Result<()> {
                 .into_par_iter()
                 .map(|(r1, r2)| {
                     let ref_match = r1.seq.find(ref_forward_seq).is_some()
+                        || r1.seq.find(&ref_revcomp_seq).is_some()
+                        || r2.seq.find(ref_forward_seq).is_some()
                         || r2.seq.find(&ref_revcomp_seq).is_some();
                     let alt_match = r1.seq.find(alt_forward_seq).is_some()
+                        || r1.seq.find(&alt_revcomp_seq).is_some()
+                        || r2.seq.find(alt_forward_seq).is_some()
                         || r2.seq.find(&alt_revcomp_seq).is_some();
                     let m = match (ref_match, alt_match) {
                         (true, true) => Matches::Both,
