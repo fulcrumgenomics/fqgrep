@@ -2,26 +2,29 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use std::{
-    borrow::Borrow,
+    borrow::{Borrow, BorrowMut},
     fs::File,
-    io::{BufReader, BufWriter},
+    io::{BufReader, BufWriter, Write},
     path::{Path, PathBuf},
+    sync::Arc,
     thread::JoinHandle,
 };
 
 use anyhow::{Error, Result};
 use bstr::ByteSlice;
+use bytes::{Buf, BufMut, Bytes, BytesMut};
+use channel_reader::ChannelWriter;
 use env_logger::Env;
-use flate2::bufread::MultiGzDecoder;
+use flate2::read::MultiGzDecoder;
 use flume::{bounded, Receiver, Sender};
 use gzp::{deflate::Bgzf, Compression, ZBuilder, ZWriter, BUFSIZE};
-use itertools::{self, izip, Itertools};
+use itertools::{self, izip};
 use lazy_static::lazy_static;
 use log::info;
 use parking_lot::Mutex;
 use rayon::prelude::*;
 use regex::{Regex, RegexBuilder};
-use seq_io::fastq::{self, OwnedRecord};
+use seq_io::fastq::{self, OwnedRecord, RecordSet, RefRecord};
 use serde::{Deserialize, Serialize};
 use structopt::{clap::AppSettings::ColoredHelp, StructOpt};
 
@@ -41,9 +44,9 @@ const BOTH_PREFIX: &str = "BOTH";
 /// `1` are alt reads
 /// `2` are reads that matched both
 type MatchedReads = (
-    (Vec<OwnedRecord>, Vec<OwnedRecord>),
-    (Vec<OwnedRecord>, Vec<OwnedRecord>),
-    (Vec<OwnedRecord>, Vec<OwnedRecord>),
+    (BytesMut, BytesMut),
+    (BytesMut, BytesMut),
+    (BytesMut, BytesMut),
 );
 
 lazy_static! {
@@ -184,38 +187,42 @@ impl WriterStats {
     }
 }
 
+#[derive(Debug)]
 struct ThreadWriter {
     handle: JoinHandle<WriterStats>,
-    tx: Option<Sender<Vec<OwnedRecord>>>,
+    tx: Option<ChannelWriter>,
 }
 
 impl ThreadWriter {
     fn new(mut writer: ZWriterWrapper) -> Self {
         // TODO: try making this unbounded
-        let (tx, rx): (Sender<Vec<OwnedRecord>>, Receiver<Vec<OwnedRecord>>) =
-            bounded(WRITER_CHANNEL_SIZE);
+        let (tx, rx): (Sender<Bytes>, Receiver<Bytes>) = bounded(WRITER_CHANNEL_SIZE);
         let handle = std::thread::spawn(move || {
             let mut writer_stats = WriterStats::new();
-            while let Ok(reads) = rx.recv() {
-                for read in reads {
-                    writer_stats.reads_written += 1;
-                    fastq::write_to(&mut writer.0, &read.head, &read.seq, &read.qual)
-                        .expect("failed writing read");
-                }
+            while let Ok(bytes) = rx.recv() {
+                // for read in reads {
+                // writer_stats.reads_written += 1;
+                writer.0.write_all(&bytes[..]).unwrap();
+                // fastq::write(&mut writer.0, &read.head, &read.seq, &read.qual)
+                //     .expect("failed writing read");
+                // }
             }
             writer.0.finish().expect("Error flushing writer");
             writer_stats
         });
+
+        let writer = channel_reader::ChannelWriter::new(tx);
         Self {
             handle,
-            tx: Some(tx),
+            tx: Some(writer),
         }
     }
 }
+
+#[derive(Debug)]
 struct SampleWriter {
     r1: ThreadWriter, // + Send
     r2: ThreadWriter, // + Send
-    lock: Mutex<()>,
 }
 
 impl SampleWriter {
@@ -235,7 +242,13 @@ impl SampleWriter {
         let r2 = ThreadWriter::new(ZWriterWrapper(r2_writer));
         let lock = Mutex::new(());
 
-        Ok(Self { r1, r2, lock })
+        Ok(Self { r1, r2 })
+    }
+
+    // todo prop errors
+    fn write_records(&mut self, (r1, r2): (Bytes, Bytes)) {
+        self.r1.tx.as_mut().unwrap().write_all(&r1);
+        self.r2.tx.as_mut().unwrap().write_all(&r2);
     }
 }
 
@@ -247,29 +260,47 @@ unsafe impl Sync for ZWriterWrapper {}
 
 struct ThreadReader {
     handle: JoinHandle<()>,
-    rx: Receiver<Vec<OwnedRecord>>,
+    rx: Receiver<RecordSet>,
 }
 
 impl ThreadReader {
-    fn new(file: PathBuf) -> Self {
+    fn new(file: PathBuf, chunksize: usize) -> Self {
         let (tx, rx) = bounded(READER_CHANNEL_SIZE);
         let handle = std::thread::spawn(move || {
-            let reader = fastq::Reader::with_capacity(
-                MultiGzDecoder::new(BufReader::with_capacity(
-                    BUFSIZE,
-                    File::open(&file).expect("error in opening file"),
-                )),
+            let reader = BufReader::with_capacity(
                 BUFSIZE,
-            )
-            .into_records()
-            .chunks(CHUNKSIZE * num_cpus::get());
-            let chunks = reader.into_iter();
+                File::open(&file).expect("error in opening file"),
+            );
+            // let reader = channel_reader::GlommioReader::new(&file);
+            let mut reader = fastq::Reader::with_capacity(
+                // MultiGzDecoder::new(),
+                gzp::par::decompress::ParDecompressBuilder::<Bgzf>::new()
+                    .num_threads(4)
+                    .unwrap()
+                    .from_reader(reader),
+                BUFSIZE,
+            );
 
-            for chunk in chunks {
-                // let now = std::time::Instant::now();
-                tx.send(chunk.map(|r| r.expect("Error reading")).collect())
-                    .expect("Error sending");
+            loop {
+                let mut record_set = RecordSet::default();
+
+                if !reader
+                    .read_record_set_exact(&mut record_set, chunksize)
+                    .unwrap()
+                {
+                    break;
+                }
+                tx.send(record_set).expect("Failed to send record set");
             }
+            // .into_records()
+            // .chunks(CHUNKSIZE); //* num_cpus::get());
+            // let chunks = reader.into_iter();
+
+            // for chunk in chunks {
+            //     // let now = std::time::Instant::now();
+            //     tx.send(chunk.map(|r| r.expect("Error reading")).collect())
+            //         .expect("Error sending");
+            // }
         });
 
         Self { handle, rx }
@@ -319,6 +350,9 @@ struct Opts {
     #[structopt(long, short = "c", default_value = "0")]
     compression_threads: usize,
 
+    #[structopt(long, short = "C", default_value = "500")]
+    chunksize: usize,
+
     /// The output directory to write to (must exist)
     ///
     /// `fqgrep` will write a pair of fastqs for the alt matched reads to: {output_dir}/ALT_{sample_name}R{1,2}.fastq.gz
@@ -337,12 +371,21 @@ fn main() -> Result<()> {
     let alt_sample = Sample::from_r1_path(&opts.r1_fastq, ALT_PREFIX)?;
     let both_sample = Sample::from_r1_path(&opts.r1_fastq, BOTH_PREFIX)?;
 
-    let mut ref_writer =
-        SampleWriter::new(&ref_sample, &opts.output_dir, opts.compression_threads)?;
-    let mut alt_writer =
-        SampleWriter::new(&alt_sample, &opts.output_dir, opts.compression_threads)?;
-    let mut both_writer =
-        SampleWriter::new(&both_sample, &opts.output_dir, opts.compression_threads)?;
+    let mut ref_writer = Arc::new(Mutex::new(SampleWriter::new(
+        &ref_sample,
+        &opts.output_dir,
+        opts.compression_threads,
+    )?));
+    let mut alt_writer = Arc::new(Mutex::new(SampleWriter::new(
+        &alt_sample,
+        &opts.output_dir,
+        opts.compression_threads,
+    )?));
+    let mut both_writer = Arc::new(Mutex::new(SampleWriter::new(
+        &both_sample,
+        &opts.output_dir,
+        opts.compression_threads,
+    )?));
 
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(opts.threads_for_matching)
@@ -351,90 +394,246 @@ fn main() -> Result<()> {
 
     // TODO: make sure errors aren't being eaten
     info!("Creating reader threads");
-    let r1_reader = ThreadReader::new(opts.r1_fastq.clone());
-    let r2_reader = ThreadReader::new(opts.r2_fastq.clone());
+    let r1_reader = ThreadReader::new(opts.r1_fastq.clone(), opts.chunksize);
+    let r2_reader = ThreadReader::new(opts.r2_fastq.clone(), opts.chunksize);
+    // let mut r1_reader = create_reader(opts.r1_fastq.clone());
+    // let mut r2_reader = create_reader(opts.r2_fastq.clone());
 
     let ref_forward_seq = opts.ref_search_sequence.as_bytes();
     let ref_revcomp_seq = revcomp(ref_forward_seq);
     let alt_forward_seq = opts.alt_search_sequence.as_bytes();
     let alt_revcomp_seq = revcomp(alt_forward_seq);
 
+    // Takeaway: just passing around record sets is a huge win
+    // -  this was limited by decompression, offloading to gzp for major win "-t 16 -c 500"  seems fastest
+
     info!("Processing reads");
     pool.install(|| {
-        for (r1_super, r2_super) in izip!(r1_reader.rx.iter(), r2_reader.rx.iter()) {
-            (r1_super, r2_super)
-                .into_par_iter()
-                .map(|(r1, r2)| {
-                    let ref_match = r1.seq.find(ref_forward_seq).is_some()
-                        || r1.seq.find(&ref_revcomp_seq).is_some()
-                        || r2.seq.find(ref_forward_seq).is_some()
-                        || r2.seq.find(&ref_revcomp_seq).is_some();
-                    let alt_match = r1.seq.find(alt_forward_seq).is_some()
-                        || r1.seq.find(&alt_revcomp_seq).is_some()
-                        || r2.seq.find(alt_forward_seq).is_some()
-                        || r2.seq.find(&alt_revcomp_seq).is_some();
+        r1_reader
+            .rx
+            .iter()
+            .zip(r2_reader.rx.iter())
+            .par_bridge()
+            .map(|(r1_super, r2_super)| {
+                // What if I write to a local bytes then once to the endpoints?
+                let mut ref_r1_recs = BytesMut::new();
+                let mut ref_r2_recs = BytesMut::new();
+                let mut alt_r1_recs = BytesMut::new();
+                let mut alt_r2_recs = BytesMut::new();
+                let mut both_r1_recs = BytesMut::new();
+                let mut both_r2_recs = BytesMut::new();
+                for (r1, r2) in r1_super.into_iter().zip(r2_super.into_iter()) {
+                    let r1_seq: Vec<u8> = r1.seq_lines().flatten().copied().collect();
+                    let r2_seq: Vec<u8> = r2.seq_lines().flatten().copied().collect();
+                    let ref_match = r1_seq.find(ref_forward_seq).is_some()
+                        || r1_seq.find(&ref_revcomp_seq).is_some()
+                        || r2_seq.find(ref_forward_seq).is_some()
+                        || r2_seq.find(&ref_revcomp_seq).is_some();
+                    let alt_match = r1_seq.find(alt_forward_seq).is_some()
+                        || r1_seq.find(&alt_revcomp_seq).is_some()
+                        || r2_seq.find(alt_forward_seq).is_some()
+                        || r2_seq.find(&alt_revcomp_seq).is_some();
                     let m = match (ref_match, alt_match) {
                         (true, true) => Matches::Both,
                         (true, false) => Matches::Ref,
                         (false, true) => Matches::Alt,
                         (false, false) => Matches::None,
                     };
-                    (m, (r1, r2))
-                })
-                .filter(|(m, _)| *m != Matches::None)
-                .fold(
-                    || ((vec![], vec![]), (vec![], vec![]), (vec![], vec![])),
-                    |(mut ref_reads, mut alt_reads, mut both_reads): MatchedReads,
-                     (match_type, (r1, r2)): (Matches, (OwnedRecord, OwnedRecord))| {
-                        match match_type {
-                            Matches::Ref => {
-                                ref_reads.0.push(r1);
-                                ref_reads.1.push(r2);
-                            }
-                            Matches::Alt => {
-                                alt_reads.0.push(r1);
-                                alt_reads.1.push(r2);
-                            }
-                            Matches::Both => {
-                                both_reads.0.push(r1);
-                                both_reads.1.push(r2);
-                            }
-                            _ => unreachable!()
+                    // (m, (r1, r2))
+                    match m {
+                        Matches::Ref => {
+                            r1.write_unchanged((&mut ref_r1_recs).writer()).unwrap();
+                            r2.write_unchanged((&mut ref_r2_recs).writer()).unwrap();
                         }
-                        (ref_reads, alt_reads, both_reads)
-                    },
+                        Matches::Alt => {
+                            r1.write_unchanged((&mut alt_r1_recs).writer()).unwrap();
+                            r2.write_unchanged((&mut alt_r2_recs).writer()).unwrap();
+                        }
+                        Matches::Both => {
+                            r1.write_unchanged((&mut both_r1_recs).writer()).unwrap();
+                            r2.write_unchanged((&mut both_r2_recs).writer()).unwrap();
+                        }
+                        Matches::None => (),
+                    }
+                } // end for loop
+                (
+                    (ref_r1_recs, ref_r2_recs),
+                    (alt_r1_recs, alt_r2_recs),
+                    (both_r1_recs, both_r2_recs),
                 )
-                .for_each(
-                    |(ref_reads, alt_reads, both_reads): MatchedReads| {
-                        // Aquire lock to ensure R1 and R2 are enqueued at the same time
-                        {
-                            let _lock = ref_writer.lock.lock();
-                            ref_writer.r1.tx.as_ref().unwrap().send(ref_reads.0).expect("Failed to send R1s");
-                            ref_writer.r2.tx.as_ref().unwrap().send(ref_reads.1).expect("Failed to send R1s");
-                        }
-                        {
-                            let _lock = alt_writer.lock.lock();
-                            alt_writer.r1.tx.as_ref().unwrap().send(alt_reads.0).expect("Failed to send R1s");
-                            alt_writer.r2.tx.as_ref().unwrap().send(alt_reads.1).expect("Failed to send R1s");
-                        }
-                        {
-                            let _lock = both_writer.lock.lock();
-                            both_writer.r1.tx.as_ref().unwrap().send(both_reads.0).expect("Failed to send R1s");
-                            both_writer.r2.tx.as_ref().unwrap().send(both_reads.1).expect("Failed to send R1s");
-                        }
-                    },
-                );
-        }
-    });
+            })
+            .fold(
+                || {
+                    (
+                        (BytesMut::new(), BytesMut::new()),
+                        (BytesMut::new(), BytesMut::new()),
+                        (BytesMut::new(), BytesMut::new()),
+                    )
+                },
+                |(mut acc_ref_reads, mut acc_alt_reads, mut acc_both_reads): MatchedReads,
+                 (ref_reads, alt_reads, both_reads): MatchedReads| {
+                    acc_ref_reads.0.extend_from_slice(&ref_reads.0[..]);
+                    acc_ref_reads.1.extend_from_slice(&ref_reads.1[..]);
 
-    info!("Joining reader threads");
-    r1_reader.handle.join().expect("Failed to join r1");
-    r2_reader.handle.join().expect("Failed to join r2");
+                    acc_alt_reads.0.extend_from_slice(&alt_reads.0[..]);
+                    acc_alt_reads.1.extend_from_slice(&alt_reads.1[..]);
+
+                    acc_both_reads.0.extend_from_slice(&both_reads.0[..]);
+                    acc_both_reads.1.extend_from_slice(&both_reads.1[..]);
+
+                    (acc_ref_reads, acc_alt_reads, acc_both_reads)
+                },
+            )
+            .for_each(|(ref_reads, alt_reads, both_reads): MatchedReads| {
+                let mut ref_writer = ref_writer.lock();
+                ref_writer.write_records((ref_reads.0.freeze(), ref_reads.1.freeze()));
+                drop(ref_writer);
+                let mut alt_writer = alt_writer.lock();
+                alt_writer.write_records((alt_reads.0.freeze(), alt_reads.1.freeze()));
+                drop(alt_writer);
+                let mut both_writer = both_writer.lock();
+                both_writer.write_records((both_reads.0.freeze(), both_reads.1.freeze()));
+                drop(both_writer);
+            });
+    }); // close pool install
+
+    // // izip!(
+    // //     r1_super.into_iter().map(|r| r.to_owned_record()),
+    // //     r2_super.into_iter().map(|r| r.to_owned_record()),
+    // // )
+    // izip!(r1_super, r2_super,)
+    //     .map(|(r1, r2)| {
+    //         let ref_match = r1.seq.find(ref_forward_seq).is_some()
+    //             || r1.seq.find(&ref_revcomp_seq).is_some()
+    //             || r2.seq.find(ref_forward_seq).is_some()
+    //             || r2.seq.find(&ref_revcomp_seq).is_some();
+    //         let alt_match = r1.seq.find(alt_forward_seq).is_some()
+    //             || r1.seq.find(&alt_revcomp_seq).is_some()
+    //             || r2.seq.find(alt_forward_seq).is_some()
+    //             || r2.seq.find(&alt_revcomp_seq).is_some();
+    //         let m = match (ref_match, alt_match) {
+    //             (true, true) => Matches::Both,
+    //             (true, false) => Matches::Ref,
+    //             (false, true) => Matches::Alt,
+    //             (false, false) => Matches::None,
+    //         };
+    //         (m, (r1, r2))
+    //     })
+    //     .filter(|(m, _)| *m != Matches::None)
+    //     .for_each(|(m, (r1, r2))| match m {
+    //         Matches::Ref => {
+    //             let lock = ref_writer.lock.lock();
+    //             ref_writer
+    //                 .r1
+    //                 .tx
+    //                 .as_ref()
+    //                 .unwrap()
+    //                 .send(r1)
+    //                 .expect("Failed to send R1s");
+    //             ref_writer
+    //                 .r2
+    //                 .tx
+    //                 .as_ref()
+    //                 .unwrap()
+    //                 .send(r2)
+    //                 .expect("Failed to send R1s");
+    //             drop(lock)
+    //         }
+    //         Matches::Alt => {
+    //             let lock = alt_writer.lock.lock();
+    //             alt_writer
+    //                 .r1
+    //                 .tx
+    //                 .as_ref()
+    //                 .unwrap()
+    //                 .send(r1)
+    //                 .expect("Failed to send R1s");
+    //             alt_writer
+    //                 .r2
+    //                 .tx
+    //                 .as_ref()
+    //                 .unwrap()
+    //                 .send(r2)
+    //                 .expect("Failed to send R1s");
+    //             drop(lock)
+    //         }
+    //         Matches::Both => {
+    //             let lock = both_writer.lock.lock();
+    //             both_writer
+    //                 .r1
+    //                 .tx
+    //                 .as_ref()
+    //                 .unwrap()
+    //                 .send(r1)
+    //                 .expect("Failed to send R1s");
+    //             both_writer
+    //                 .r2
+    //                 .tx
+    //                 .as_ref()
+    //                 .unwrap()
+    //                 .send(r2)
+    //                 .expect("Failed to send R1s");
+    //             drop(lock)
+    //         }
+    //         _ => unreachable!(),
+    //     });
+    // .fold(
+    //     || ((vec![], vec![]), (vec![], vec![]), (vec![], vec![])),Vj
+    //     |(mut ref_reads, mut alt_reads, mut both_reads): MatchedReads,
+    //      (match_type, (r1, r2)): (Matches, (OwnedRecord, OwnedRecord))| {
+    //         match match_type {
+    //             Matches::Ref => {
+    //                 ref_reads.0.push(r1);
+    //                 ref_reads.1.push(r2);
+    //             }
+    //             Matches::Alt => {
+    //                 alt_reads.0.push(r1);
+    //                 alt_reads.1.push(r2);
+    //             }
+    //             Matches::Both => {
+    //                 both_reads.0.push(r1);
+    //                 both_reads.1.push(r2);
+    //             }
+    //             _ => unreachable!()
+    //         }
+    //         (ref_reads, alt_reads, both_reads)
+    //     },
+    // )
+    // .for_each(
+    //     |(ref_reads, alt_reads, both_reads): MatchedReads| {
+    //         // Aquire lock to ensure R1 and R2 are enqueued at the same time
+    //         {
+    //             let _lock = ref_writer.lock.lock();
+    //             ref_writer.r1.tx.as_ref().unwrap().send(ref_reads.0).expect("Failed to send R1s");
+    //             ref_writer.r2.tx.as_ref().unwrap().send(ref_reads.1).expect("Failed to send R1s");
+    //         }
+    //         {
+    //             let _lock = alt_writer.lock.lock();
+    //             alt_writer.r1.tx.as_ref().unwrap().send(alt_reads.0).expect("Failed to send R1s");
+    //             alt_writer.r2.tx.as_ref().unwrap().send(alt_reads.1).expect("Failed to send R1s");
+    //         }
+    //         {
+    //             let _lock = both_writer.lock.lock();
+    //             both_writer.r1.tx.as_ref().unwrap().send(both_reads.0).expect("Failed to send R1s");
+    //             both_writer.r2.tx.as_ref().unwrap().send(both_reads.1).expect("Failed to send R1s");
+    //         }
+    //     },
+    // );
+    //         });
+    // });
+
+    // info!("Joining reader threads");
+    // r1_reader.handle.join().expect("Failed to join r1");
+    // r2_reader.handle.join().expect("Failed to join r2");
 
     // Flush and close writers
     info!("Joining writer threads and collecting stats");
-    while !ref_writer.r1.tx.as_ref().unwrap().is_empty() {}
-    while !ref_writer.r2.tx.as_ref().unwrap().is_empty() {}
+    // while !ref_writer.r1.tx.as_ref().unwrap().is_empty() {}
+    // while !ref_writer.r2.tx.as_ref().unwrap().is_empty() {}
+    let lock = Arc::try_unwrap(ref_writer).expect("lock sitll owned");
+    let mut ref_writer = lock.into_inner();
+    ref_writer.r1.tx.as_mut().unwrap().flush();
+    ref_writer.r2.tx.as_mut().unwrap().flush();
     ref_writer.r1.tx.take();
     ref_writer.r2.tx.take();
     let ref_r1_stats = ref_writer
@@ -447,8 +646,12 @@ fn main() -> Result<()> {
         .handle
         .join()
         .expect("Error joining r2 handle");
-    while !alt_writer.r1.tx.as_ref().unwrap().is_empty() {}
-    while !alt_writer.r2.tx.as_ref().unwrap().is_empty() {}
+    // while !alt_writer.r1.tx.as_ref().unwrap().is_empty() {}
+    // while !alt_writer.r2.tx.as_ref().unwrap().is_empty() {}
+    let lock = Arc::try_unwrap(alt_writer).expect("lock sitll owned");
+    let mut alt_writer = lock.into_inner();
+    alt_writer.r1.tx.as_mut().unwrap().flush();
+    alt_writer.r2.tx.as_mut().unwrap().flush();
     alt_writer.r1.tx.take();
     alt_writer.r2.tx.take();
     let alt_r1_stats = alt_writer
@@ -461,8 +664,12 @@ fn main() -> Result<()> {
         .handle
         .join()
         .expect("Error joining r2 handle");
-    while !both_writer.r1.tx.as_ref().unwrap().is_empty() {}
-    while !both_writer.r2.tx.as_ref().unwrap().is_empty() {}
+    // while !both_writer.r1.tx.as_ref().unwrap().is_empty() {}
+    // while !both_writer.r2.tx.as_ref().unwrap().is_empty() {}
+    let lock = Arc::try_unwrap(both_writer).expect("lock sitll owned");
+    let mut both_writer = lock.into_inner();
+    both_writer.r1.tx.as_mut().unwrap().flush();
+    both_writer.r2.tx.as_mut().unwrap().flush();
     both_writer.r1.tx.take();
     both_writer.r2.tx.take();
     let both_r1_stats = both_writer
