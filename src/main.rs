@@ -13,7 +13,7 @@ use std::{
 use anyhow::{Error, Result};
 use bstr::ByteSlice;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use channel_reader::ChannelWriter;
+use channel_io::ChannelWriter;
 use env_logger::Env;
 use flate2::read::MultiGzDecoder;
 use flume::{bounded, Receiver, Sender};
@@ -24,7 +24,10 @@ use log::info;
 use parking_lot::Mutex;
 use rayon::prelude::*;
 use regex::{Regex, RegexBuilder};
-use seq_io::fastq::{self, OwnedRecord, RecordSet, RefRecord};
+use seq_io::{
+    fastq::{self, OwnedRecord, RecordSet, RefRecord},
+    BaseRecord,
+};
 use serde::{Deserialize, Serialize};
 use structopt::{clap::AppSettings::ColoredHelp, StructOpt};
 
@@ -211,7 +214,7 @@ impl ThreadWriter {
             writer_stats
         });
 
-        let writer = channel_reader::ChannelWriter::new(tx);
+        let writer = ChannelWriter::new(tx);
         Self {
             handle,
             tx: Some(writer),
@@ -240,7 +243,6 @@ impl SampleWriter {
             .compression_level(Compression::new(2))
             .from_writer(BufWriter::with_capacity(BUFSIZE, File::create(r2)?));
         let r2 = ThreadWriter::new(ZWriterWrapper(r2_writer));
-        let lock = Mutex::new(());
 
         Ok(Self { r1, r2 })
     }
@@ -423,8 +425,10 @@ fn main() -> Result<()> {
                 let mut both_r1_recs = BytesMut::new();
                 let mut both_r2_recs = BytesMut::new();
                 for (r1, r2) in r1_super.into_iter().zip(r2_super.into_iter()) {
-                    let r1_seq: Vec<u8> = r1.seq_lines().flatten().copied().collect();
-                    let r2_seq: Vec<u8> = r2.seq_lines().flatten().copied().collect();
+                    let r1_seq = &r1.seq();
+                    let r2_seq = &r1.seq();
+                    // let r1_seq: Vec<u8> = r1.seq_lines().flatten().copied().collect();
+                    // let r2_seq: Vec<u8> = r2.seq_lines().flatten().copied().collect();
                     let ref_match = r1_seq.find(ref_forward_seq).is_some()
                         || r1_seq.find(&ref_revcomp_seq).is_some()
                         || r2_seq.find(ref_forward_seq).is_some()
