@@ -1,5 +1,6 @@
 [package]
 name = "fqgrep"
+authors = ["Nils Homer <nils@fulcrumgenomics.com>", "Seth Stadick <seth@fulcrumgenomics.com>"]
 version = "0.1.1-alpha.1"
 edition = "2018"
 license = "MIT"
