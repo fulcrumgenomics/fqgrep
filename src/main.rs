@@ -3,6 +3,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use std::{
     borrow::Borrow,
+    fs,
     fs::File,
     io::{BufReader, BufWriter},
     path::{Path, PathBuf},
@@ -159,18 +160,27 @@ impl Sample {
             .to_string_lossy();
         let parts: Vec<&str> = R1_REGEX.splitn(&filename, 2).collect();
         if let Some(&part) = parts.first() {
-            Ok(Self::new(format!("{}_{}", prefix, part.to_owned())))
+            let name: &str = &part[0..part.len() - 1];
+            Ok(Self::new(format!("{}_{}", prefix, name.to_owned())))
         } else {
             Err(Error::msg("Unable to extract a sample name from R1 path"))
         }
     }
 
-    // TODO: make names match illumina standards
-    fn filenames<P: AsRef<Path>>(&self, dir: P) -> (PathBuf, PathBuf) {
-        (
-            dir.as_ref().join(format!("{}R1.fastq.gz", self.name)),
-            dir.as_ref().join(format!("{}R2.fastq.gz", self.name)),
-        )
+    fn filenames<P: AsRef<Path>>(&self, dir: P, illumina: bool) -> (PathBuf, PathBuf) {
+        if illumina {
+            (
+                dir.as_ref()
+                    .join(format!("{}_S1_L001_R1_001.fastq.gz", self.name)),
+                dir.as_ref()
+                    .join(format!("{}_S1_L001_R2_001.fastq.gz", self.name)),
+            )
+        } else {
+            (
+                dir.as_ref().join(format!("{}.R1.fastq.gz", self.name)),
+                dir.as_ref().join(format!("{}.R2.fastq.gz", self.name)),
+            )
+        }
     }
 }
 
@@ -219,8 +229,13 @@ struct SampleWriter {
 }
 
 impl SampleWriter {
-    fn new<P: AsRef<Path>>(sample: &Sample, dir: P, compression_threads: usize) -> Result<Self> {
-        let (r1, r2) = sample.filenames(dir);
+    fn new<P: AsRef<Path>>(
+        sample: &Sample,
+        dir: P,
+        compression_threads: usize,
+        illumina: bool,
+    ) -> Result<Self> {
+        let (r1, r2) = sample.filenames(dir, illumina);
 
         let r1_writer = ZBuilder::<Bgzf, _>::new()
             .num_threads(compression_threads)
@@ -290,25 +305,32 @@ enum Matches {
 #[structopt(name = "fqgrep", global_setting(ColoredHelp), version = built_info::VERSION.as_str())]
 struct Opts {
     /// Path to the input R1 gzipped FASTQ
-    #[structopt(long, short = "1")]
+    #[structopt(long, short = "1", display_order = 1)]
     r1_fastq: PathBuf,
 
     /// Path to the input R2 gzipped FASTQ
-    #[structopt(long, short = "2")]
+    #[structopt(long, short = "2", display_order = 2)]
     r2_fastq: PathBuf,
 
+    /// The output directory to write to.
+    ///
+    /// `fqgrep` will write a pair of fastqs for the alt matched reads to: {output_dir}/ALT_{sample_name}R{1,2}.fastq.gz
+    /// and the fastqs for the ref matched reads to {output_dir}/REF_{sample_name}R{1,2}.fastq.gz
+    #[structopt(long, short = "o", display_order = 3)]
+    output_dir: PathBuf,
+
     /// The "ref" search sequence to grep for, for R2 reads the search sequence is reverse complemented.
-    #[structopt(long, short = "r")]
+    #[structopt(long, short = "r", display_order = 4)]
     ref_search_sequence: String,
 
     /// The "alt" search sequence to grep for, for R2 reads the search sequence is reverse complemented.
-    #[structopt(long, short = "a")]
+    #[structopt(long, short = "a", display_order = 5)]
     alt_search_sequence: String,
 
     /// The number of threads to use for matching reads against pattern
     ///
     /// Keep in mind that there is are two reader threads and two writer threads created by default.
-    #[structopt(long, short = "t", default_value = NUM_CPU.as_str())]
+    #[structopt(long, short = "t", default_value = NUM_CPU.as_str(), display_order = 6)]
     threads_for_matching: usize,
 
     /// Number of threads to use for compression.
@@ -316,15 +338,15 @@ struct Opts {
     /// Zero is probably the correct answer if the searched sequence is relatively rare.
     /// If it's common and many reads will be written, it may be worth decreasing the number of
     /// `treads_for_matching` by a small number and making this number > 2
-    #[structopt(long, short = "c", default_value = "0")]
+    #[structopt(long, short = "c", default_value = "0", display_order = 7)]
     compression_threads: usize,
 
-    /// The output directory to write to (must exist)
+    /// True to name output FASTQs based on Illumin's FASTQ file name convetions.
     ///
-    /// `fqgrep` will write a pair of fastqs for the alt matched reads to: {output_dir}/ALT_{sample_name}R{1,2}.fastq.gz
-    /// and the fastqs for the ref matched reads to {output_dir}/REF_{sample_name}R{1,2}.fastq.gz
-    #[structopt(long, short = "o")]
-    output_dir: PathBuf,
+    /// If true, will use the file name pattern "<Sample Name>_S1_L001_R<1 or 2>_001.fastq.gz".
+    /// Otherwise, will use "<Sample Name>.R<1 or 2>.fastq.gz"
+    #[structopt(long, short = "I", display_order = 8)]
+    illumina: bool,
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
@@ -337,12 +359,27 @@ fn main() -> Result<()> {
     let alt_sample = Sample::from_r1_path(&opts.r1_fastq, ALT_PREFIX)?;
     let both_sample = Sample::from_r1_path(&opts.r1_fastq, BOTH_PREFIX)?;
 
-    let mut ref_writer =
-        SampleWriter::new(&ref_sample, &opts.output_dir, opts.compression_threads)?;
-    let mut alt_writer =
-        SampleWriter::new(&alt_sample, &opts.output_dir, opts.compression_threads)?;
-    let mut both_writer =
-        SampleWriter::new(&both_sample, &opts.output_dir, opts.compression_threads)?;
+    // Create the output directory
+    fs::create_dir_all(&opts.output_dir)?;
+
+    let mut ref_writer = SampleWriter::new(
+        &ref_sample,
+        &opts.output_dir,
+        opts.compression_threads,
+        opts.illumina,
+    )?;
+    let mut alt_writer = SampleWriter::new(
+        &alt_sample,
+        &opts.output_dir,
+        opts.compression_threads,
+        opts.illumina,
+    )?;
+    let mut both_writer = SampleWriter::new(
+        &both_sample,
+        &opts.output_dir,
+        opts.compression_threads,
+        opts.illumina,
+    )?;
 
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(opts.threads_for_matching)

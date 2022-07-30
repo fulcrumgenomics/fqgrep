@@ -2,6 +2,14 @@
 name = "fqgrep"
 version = "0.1.0"
 edition = "2018"
+license = "MIT"
+description = "Search a pair of fastq files for reads that match a given ref or alt sequence"
+homepage = "https://github.com/fulcrumgenomics/fqgrep"
+documentation = "https://docs.rs/fqgrep"
+repository = "https://github.com/fulcrumgenomics/fqgrep"
+readme = "README.md"
+categories = ["science"]
+keywords = ["bioinformatics", "fastq"]
 
 
 [profile.release]
