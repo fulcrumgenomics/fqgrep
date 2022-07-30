@@ -170,12 +170,12 @@ impl Sample {
     fn filenames<P: AsRef<Path>>(&self, dir: P, illumina: bool) -> (PathBuf, PathBuf) {
         if illumina {
             (
-                dir.as_ref().join(format!("{}_S1_L001_R1_001.fastq.gz", self.name)),
-                dir.as_ref().join(format!("{}_S1_L001_R2_001.fastq.gz", self.name)),
+                dir.as_ref()
+                    .join(format!("{}_S1_L001_R1_001.fastq.gz", self.name)),
+                dir.as_ref()
+                    .join(format!("{}_S1_L001_R2_001.fastq.gz", self.name)),
             )
-
-        }
-        else {
+        } else {
             (
                 dir.as_ref().join(format!("{}.R1.fastq.gz", self.name)),
                 dir.as_ref().join(format!("{}.R2.fastq.gz", self.name)),
@@ -229,7 +229,12 @@ struct SampleWriter {
 }
 
 impl SampleWriter {
-    fn new<P: AsRef<Path>>(sample: &Sample, dir: P, compression_threads: usize, illumina: bool) -> Result<Self> {
+    fn new<P: AsRef<Path>>(
+        sample: &Sample,
+        dir: P,
+        compression_threads: usize,
+        illumina: bool,
+    ) -> Result<Self> {
         let (r1, r2) = sample.filenames(dir, illumina);
 
         let r1_writer = ZBuilder::<Bgzf, _>::new()
@@ -357,12 +362,24 @@ fn main() -> Result<()> {
     // Create the output directory
     fs::create_dir_all(&opts.output_dir)?;
 
-    let mut ref_writer =
-        SampleWriter::new(&ref_sample, &opts.output_dir, opts.compression_threads, opts.illumina)?;
-    let mut alt_writer =
-        SampleWriter::new(&alt_sample, &opts.output_dir, opts.compression_threads, opts.illumina)?;
-    let mut both_writer =
-        SampleWriter::new(&both_sample, &opts.output_dir, opts.compression_threads, opts.illumina)?;
+    let mut ref_writer = SampleWriter::new(
+        &ref_sample,
+        &opts.output_dir,
+        opts.compression_threads,
+        opts.illumina,
+    )?;
+    let mut alt_writer = SampleWriter::new(
+        &alt_sample,
+        &opts.output_dir,
+        opts.compression_threads,
+        opts.illumina,
+    )?;
+    let mut both_writer = SampleWriter::new(
+        &both_sample,
+        &opts.output_dir,
+        opts.compression_threads,
+        opts.illumina,
+    )?;
 
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(opts.threads_for_matching)
