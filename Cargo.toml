@@ -1,6 +1,6 @@
 [package]
 name = "fqgrep"
-version = "0.1.0"
+version = "0.1.1-alpha.1"
 edition = "2018"
 license = "MIT"
 description = "Search a pair of fastq files for reads that match a given ref or alt sequence"
