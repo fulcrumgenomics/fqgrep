@@ -3,6 +3,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use std::{
     borrow::Borrow,
+    fs,
     fs::File,
     io::{BufReader, BufWriter},
     path::{Path, PathBuf},
@@ -159,7 +160,8 @@ impl Sample {
             .to_string_lossy();
         let parts: Vec<&str> = R1_REGEX.splitn(&filename, 2).collect();
         if let Some(&part) = parts.first() {
-            Ok(Self::new(format!("{}_{}", prefix, part.to_owned())))
+            let name: &str = &part[0..part.len() - 1];
+            Ok(Self::new(format!("{}_{}", prefix, name.to_owned())))
         } else {
             Err(Error::msg("Unable to extract a sample name from R1 path"))
         }
@@ -168,15 +170,15 @@ impl Sample {
     fn filenames<P: AsRef<Path>>(&self, dir: P, illumina: bool) -> (PathBuf, PathBuf) {
         if illumina {
             (
-                dir.as_ref().join(format!("{}_S1_L001_R1_001", self.name)),
-                dir.as_ref().join(format!("{}_S1_L001_R2_001", self.name)),
+                dir.as_ref().join(format!("{}_S1_L001_R1_001.fastq.gz", self.name)),
+                dir.as_ref().join(format!("{}_S1_L001_R2_001.fastq.gz", self.name)),
             )
 
         }
         else {
             (
-                dir.as_ref().join(format!("{}R1.fastq.gz", self.name)),
-                dir.as_ref().join(format!("{}R2.fastq.gz", self.name)),
+                dir.as_ref().join(format!("{}.R1.fastq.gz", self.name)),
+                dir.as_ref().join(format!("{}.R2.fastq.gz", self.name)),
             )
         }
     }
@@ -305,7 +307,7 @@ struct Opts {
     #[structopt(long, short = "2", display_order = 2)]
     r2_fastq: PathBuf,
 
-    /// The output directory to write to (must exist)
+    /// The output directory to write to.
     ///
     /// `fqgrep` will write a pair of fastqs for the alt matched reads to: {output_dir}/ALT_{sample_name}R{1,2}.fastq.gz
     /// and the fastqs for the ref matched reads to {output_dir}/REF_{sample_name}R{1,2}.fastq.gz
@@ -351,6 +353,9 @@ fn main() -> Result<()> {
     let ref_sample = Sample::from_r1_path(&opts.r1_fastq, REF_PREFIX)?;
     let alt_sample = Sample::from_r1_path(&opts.r1_fastq, ALT_PREFIX)?;
     let both_sample = Sample::from_r1_path(&opts.r1_fastq, BOTH_PREFIX)?;
+
+    // Create the output directory
+    fs::create_dir_all(&opts.output_dir)?;
 
     let mut ref_writer =
         SampleWriter::new(&ref_sample, &opts.output_dir, opts.compression_threads, opts.illumina)?;
