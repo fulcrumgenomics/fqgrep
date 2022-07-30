@@ -298,25 +298,32 @@ enum Matches {
 #[structopt(name = "fqgrep", global_setting(ColoredHelp), version = built_info::VERSION.as_str())]
 struct Opts {
     /// Path to the input R1 gzipped FASTQ
-    #[structopt(long, short = "1")]
+    #[structopt(long, short = "1", display_order = 1)]
     r1_fastq: PathBuf,
 
     /// Path to the input R2 gzipped FASTQ
-    #[structopt(long, short = "2")]
+    #[structopt(long, short = "2", display_order = 2)]
     r2_fastq: PathBuf,
 
+    /// The output directory to write to (must exist)
+    ///
+    /// `fqgrep` will write a pair of fastqs for the alt matched reads to: {output_dir}/ALT_{sample_name}R{1,2}.fastq.gz
+    /// and the fastqs for the ref matched reads to {output_dir}/REF_{sample_name}R{1,2}.fastq.gz
+    #[structopt(long, short = "o", display_order = 3)]
+    output_dir: PathBuf,
+
     /// The "ref" search sequence to grep for, for R2 reads the search sequence is reverse complemented.
-    #[structopt(long, short = "r")]
+    #[structopt(long, short = "r", display_order = 4)]
     ref_search_sequence: String,
 
     /// The "alt" search sequence to grep for, for R2 reads the search sequence is reverse complemented.
-    #[structopt(long, short = "a")]
+    #[structopt(long, short = "a", display_order = 5)]
     alt_search_sequence: String,
 
     /// The number of threads to use for matching reads against pattern
     ///
     /// Keep in mind that there is are two reader threads and two writer threads created by default.
-    #[structopt(long, short = "t", default_value = NUM_CPU.as_str())]
+    #[structopt(long, short = "t", default_value = NUM_CPU.as_str(), display_order = 6)]
     threads_for_matching: usize,
 
     /// Number of threads to use for compression.
@@ -324,21 +331,14 @@ struct Opts {
     /// Zero is probably the correct answer if the searched sequence is relatively rare.
     /// If it's common and many reads will be written, it may be worth decreasing the number of
     /// `treads_for_matching` by a small number and making this number > 2
-    #[structopt(long, short = "c", default_value = "0")]
+    #[structopt(long, short = "c", default_value = "0", display_order = 7)]
     compression_threads: usize,
-
-    /// The output directory to write to (must exist)
-    ///
-    /// `fqgrep` will write a pair of fastqs for the alt matched reads to: {output_dir}/ALT_{sample_name}R{1,2}.fastq.gz
-    /// and the fastqs for the ref matched reads to {output_dir}/REF_{sample_name}R{1,2}.fastq.gz
-    #[structopt(long, short = "o")]
-    output_dir: PathBuf,
 
     /// True to name output FASTQs based on Illumin's FASTQ file name convetions.
     ///
     /// If true, will use the file name pattern "<Sample Name>_S1_L001_R<1 or 2>_001.fastq.gz".
     /// Otherwise, will use "<Sample Name>.R<1 or 2>.fastq.gz"
-    #[structopt(long, short = "I")]
+    #[structopt(long, short = "I", display_order = 8)]
     illumina: bool,
 }
 
