@@ -165,12 +165,20 @@ impl Sample {
         }
     }
 
-    // TODO: make names match illumina standards
-    fn filenames<P: AsRef<Path>>(&self, dir: P) -> (PathBuf, PathBuf) {
-        (
-            dir.as_ref().join(format!("{}R1.fastq.gz", self.name)),
-            dir.as_ref().join(format!("{}R2.fastq.gz", self.name)),
-        )
+    fn filenames<P: AsRef<Path>>(&self, dir: P, illumina: bool) -> (PathBuf, PathBuf) {
+        if illumina {
+            (
+                dir.as_ref().join(format!("{}_S1_L001_R1_001", self.name)),
+                dir.as_ref().join(format!("{}_S1_L001_R2_001", self.name)),
+            )
+
+        }
+        else {
+            (
+                dir.as_ref().join(format!("{}R1.fastq.gz", self.name)),
+                dir.as_ref().join(format!("{}R2.fastq.gz", self.name)),
+            )
+        }
     }
 }
 
@@ -219,8 +227,8 @@ struct SampleWriter {
 }
 
 impl SampleWriter {
-    fn new<P: AsRef<Path>>(sample: &Sample, dir: P, compression_threads: usize) -> Result<Self> {
-        let (r1, r2) = sample.filenames(dir);
+    fn new<P: AsRef<Path>>(sample: &Sample, dir: P, compression_threads: usize, illumina: bool) -> Result<Self> {
+        let (r1, r2) = sample.filenames(dir, illumina);
 
         let r1_writer = ZBuilder::<Bgzf, _>::new()
             .num_threads(compression_threads)
@@ -325,6 +333,13 @@ struct Opts {
     /// and the fastqs for the ref matched reads to {output_dir}/REF_{sample_name}R{1,2}.fastq.gz
     #[structopt(long, short = "o")]
     output_dir: PathBuf,
+
+    /// True to name output FASTQs based on Illumin's FASTQ file name convetions.
+    ///
+    /// If true, will use the file name pattern "<Sample Name>_S1_L001_R<1 or 2>_001.fastq.gz".
+    /// Otherwise, will use "<Sample Name>.R<1 or 2>.fastq.gz"
+    #[structopt(long, short = "I")]
+    illumina: bool,
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
@@ -338,11 +353,11 @@ fn main() -> Result<()> {
     let both_sample = Sample::from_r1_path(&opts.r1_fastq, BOTH_PREFIX)?;
 
     let mut ref_writer =
-        SampleWriter::new(&ref_sample, &opts.output_dir, opts.compression_threads)?;
+        SampleWriter::new(&ref_sample, &opts.output_dir, opts.compression_threads, opts.illumina)?;
     let mut alt_writer =
-        SampleWriter::new(&alt_sample, &opts.output_dir, opts.compression_threads)?;
+        SampleWriter::new(&alt_sample, &opts.output_dir, opts.compression_threads, opts.illumina)?;
     let mut both_writer =
-        SampleWriter::new(&both_sample, &opts.output_dir, opts.compression_threads)?;
+        SampleWriter::new(&both_sample, &opts.output_dir, opts.compression_threads, opts.illumina)?;
 
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(opts.threads_for_matching)
