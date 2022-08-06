@@ -339,6 +339,7 @@ dependencies = [
  "mimalloc",
  "num_cpus",
  "parking_lot",
+ "proglog",
  "rayon",
  "regex",
  "seq_io",
@@ -723,6 +724,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c278e965f1d8cf32d6e0e96de3d3e79712178ae67986d9cf9151f51e95aac89b"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "proglog"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0907d41e1427d25a0b6376a803c9cb15d2e46586cca3a9560391c56661186aa3"
+dependencies = [
+ "log",
 ]
 
 [[package]]

@@ -20,6 +20,7 @@ use itertools::{self, izip, Itertools};
 use lazy_static::lazy_static;
 use log::info;
 use parking_lot::Mutex;
+use proglog::ProgLogBuilder;
 use rayon::prelude::*;
 use regex::{Regex, RegexBuilder};
 use seq_io::fastq::{self, OwnedRecord};
@@ -355,6 +356,13 @@ struct Barcode<'a>(&'a [u8], &'a [u8]);
 #[allow(clippy::too_many_lines)]
 fn main() -> Result<()> {
     let opts = setup();
+    let progress_logger = ProgLogBuilder::new()
+        .name("fqgrep-progress")
+        .noun("reads")
+        .verb("Searched")
+        .unit(50_000_000)
+        .build();
+
     let ref_sample = Sample::from_r1_path(&opts.r1_fastq, REF_PREFIX)?;
     let alt_sample = Sample::from_r1_path(&opts.r1_fastq, ALT_PREFIX)?;
     let both_sample = Sample::from_r1_path(&opts.r1_fastq, BOTH_PREFIX)?;
@@ -416,6 +424,7 @@ fn main() -> Result<()> {
                         (false, true) => Matches::Alt,
                         (false, false) => Matches::None,
                     };
+                    progress_logger.record();
                     (m, (r1, r2))
                 })
                 .filter(|(m, _)| *m != Matches::None)
@@ -443,7 +452,7 @@ fn main() -> Result<()> {
                 )
                 .for_each(
                     |(ref_reads, alt_reads, both_reads): MatchedReads| {
-                        // Aquire lock to ensure R1 and R2 are enqueued at the same time
+                        // Acquire lock to ensure R1 and R2 are enqueued at the same time
                         {
                             let _lock = ref_writer.lock.lock();
                             ref_writer.r1.tx.as_ref().unwrap().send(ref_reads.0).expect("Failed to send R1s");
@@ -512,7 +521,7 @@ fn main() -> Result<()> {
         .handle
         .join()
         .expect("Error joining r2 handle");
-
+    drop(progress_logger);
     info!(
         "{} reads matched input ref sequence",
         ref_r1_stats.reads_written
