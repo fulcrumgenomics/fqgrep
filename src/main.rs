@@ -20,7 +20,7 @@ use itertools::{self, izip, Itertools};
 use lazy_static::lazy_static;
 use log::info;
 use parking_lot::Mutex;
-use proglog::ProgLogBuilder;
+use proglog::{CountFormatterKind, ProgLogBuilder};
 use rayon::prelude::*;
 use regex::{Regex, RegexBuilder};
 use seq_io::fastq::{self, OwnedRecord};
@@ -361,6 +361,7 @@ fn main() -> Result<()> {
         .noun("reads")
         .verb("Searched")
         .unit(50_000_000)
+        .count_formatter(CountFormatterKind::Comma)
         .build();
 
     let ref_sample = Sample::from_r1_path(&opts.r1_fastq, REF_PREFIX)?;

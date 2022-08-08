@@ -728,11 +728,12 @@ dependencies = [
 
 [[package]]
 name = "proglog"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0907d41e1427d25a0b6376a803c9cb15d2e46586cca3a9560391c56661186aa3"
+checksum = "67860745d19bbec62e2c750b3134443fd2c1990213809e5d47914cc5ccafcd25"
 dependencies = [
  "log",
+ "thousands",
 ]
 
 [[package]]
@@ -960,6 +961,12 @@ dependencies = [
  "quote",
  "syn",
 ]
+
+[[package]]
+name = "thousands"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3bf63baf9f5039dadc247375c29eb13706706cfde997d0330d05aa63a77d8820"
 
 [[package]]
 name = "tinyvec"
