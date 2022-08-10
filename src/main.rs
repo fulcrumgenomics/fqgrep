@@ -70,22 +70,37 @@ struct FastqWriter {
 }
 
 impl FastqWriter {
-    fn new(pool: &Scope) -> Self {
-        let lock = Mutex::new(());
-        let mut writer = BufWriter::with_capacity(BUFSIZE, std::io::stdout());
+    fn new(pool: &Scope, count: bool, paired: bool) -> Self {
         // TODO: try making this unbounded
         let (tx, rx): (Sender<Vec<OwnedRecord>>, Receiver<Vec<OwnedRecord>>) =
             bounded(WRITER_CHANNEL_SIZE);
-        pool.spawn(move |_| {
-            while let Ok(reads) = rx.recv() {
-                for read in reads {
-                    fastq::write_to(&mut writer, &read.head, &read.seq, &read.qual)
-                        .expect("failed writing read");
+        if count {
+            pool.spawn(move |_| {
+                let mut num_matches = 0;
+                while let Ok(reads) = rx.recv() {
+                    num_matches += reads.len();
                 }
-            }
-            writer.flush().expect("Error flushing writer");
-        });
-
+                if paired {
+                    num_matches /= 2;
+                }
+                // TODO: count should be divided by two for paired end reads
+                std::io::stdout()
+                    .write_all(format!("{}\n", num_matches).as_bytes())
+                    .unwrap();
+            });
+        } else {
+            pool.spawn(move |_| {
+                let mut writer = BufWriter::with_capacity(BUFSIZE, std::io::stdout());
+                while let Ok(reads) = rx.recv() {
+                    for read in reads {
+                        fastq::write_to(&mut writer, &read.head, &read.seq, &read.qual)
+                            .expect("failed writing read");
+                    }
+                }
+                writer.flush().expect("Error flushing writer");
+            });
+        }
+        let lock = Mutex::new(());
         Self { tx, lock }
     }
 }
@@ -153,6 +168,10 @@ struct Opts {
     #[structopt(long)]
     paired: bool,
 
+    /// Only a count of selected lines is written to standard output.
+    #[structopt(long, short = "c")]
+    count: bool,
+
     /// Specify a pattern used during the search of the input: an input line is selected if it
     /// matches any of the specified patterns.  This option is most useful when multiple `-e`
     /// options are used to specify multiple patterns.
@@ -176,6 +195,10 @@ struct Opts {
     /// Selected lines are those not matching any of the specified patterns
     #[structopt(short = "v")]
     invert_match: bool,
+
+    /// Write progress information
+    #[structopt(long)]
+    progress: bool,
 
     /// The first argument is the pattern to match, with the remaining arguments containing the
     /// files to match.  If `-e` is given, then all the arguments are files to match.
@@ -245,13 +268,19 @@ fn main() -> Result<()> {
         }
     }
 
-    let progress_logger = ProgLogBuilder::new()
-        .name("fqgrep-progress")
-        .noun("reads")
-        .verb("Searched")
-        .unit(50_000_000)
-        .count_formatter(CountFormatterKind::Comma)
-        .build();
+    let progress_logger = if opts.progress {
+        Some(
+            ProgLogBuilder::new()
+                .name("fqgrep-progress")
+                .noun("reads")
+                .verb("Searched")
+                .unit(50_000_000)
+                .count_formatter(CountFormatterKind::Comma)
+                .build(),
+        )
+    } else {
+        None
+    };
 
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(opts.threads)
@@ -269,7 +298,7 @@ fn main() -> Result<()> {
             (true, None) => Box::new(FixedStringSetMatcher::new(&opts.regexp, match_opts)),
             (false, None) => Box::new(RegexSetMatcher::new(&opts.regexp, match_opts)),
         };
-        let writer = FastqWriter::new(s);
+        let writer = FastqWriter::new(s, opts.count, opts.paired);
 
         if opts.paired {
             if files.is_empty() {
@@ -307,11 +336,13 @@ fn main() -> Result<()> {
             for file in files {
                 let reader = ThreadReader::new(file.clone());
                 for reads in reader.rx.iter() {
-                    // Get the amtches reads
+                    // Get the matched reads
                     let matched_reads: Vec<OwnedRecord> = reads
                         .into_par_iter()
                         .map(|read| -> Option<OwnedRecord> {
-                            progress_logger.record();
+                            if let Some(progress) = &progress_logger {
+                                progress.record();
+                            }
                             if matcher.read_match(&read) {
                                 Some(read)
                             } else {
@@ -338,13 +369,15 @@ fn process_paired_reads(
     reads: Vec<(OwnedRecord, OwnedRecord)>,
     matcher: &Box<dyn Matcher + Sync>,
     writer: &FastqWriter,
-    progress_logger: &ProgLog,
+    progress_logger: &Option<ProgLog>,
 ) {
     reads
         .into_par_iter()
         .map(|(read1, read2)| {
-            progress_logger.record();
-            progress_logger.record();
+            if let Some(progress) = progress_logger {
+                progress.record();
+                progress.record();
+            }
             assert!(
                 read1.head() == read2.head(),
                 "Mismatching read pair!  R1: {} R2: {}",
