@@ -2,30 +2,28 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use std::{
-    borrow::Borrow,
-    fs,
     fs::File,
-    io::{BufReader, BufWriter},
-    path::{Path, PathBuf},
+    io::{BufRead, BufReader, BufWriter, Write},
+    path::PathBuf,
+    str::FromStr,
     thread::JoinHandle,
 };
 
-use anyhow::{Error, Result};
-use bstr::ByteSlice;
+use anyhow::{bail, ensure, Context, Result};
 use env_logger::Env;
 use flate2::bufread::MultiGzDecoder;
 use flume::{bounded, Receiver, Sender};
-use gzp::{deflate::Bgzf, Compression, ZBuilder, ZWriter, BUFSIZE};
+use fqgrep_lib::matcher::{
+    FixedStringMatcher, FixedStringSetMatcher, Matcher, MatcherOpts, RegexMatcher, RegexSetMatcher,
+};
+use gzp::BUFSIZE;
 use itertools::{self, izip, Itertools};
 use lazy_static::lazy_static;
-use log::info;
 use parking_lot::Mutex;
-use proglog::{CountFormatterKind, ProgLogBuilder};
-use rayon::prelude::*;
-use regex::{Regex, RegexBuilder};
-use seq_io::fastq::{self, OwnedRecord};
-use serde::{Deserialize, Serialize};
-use structopt::{clap::AppSettings::ColoredHelp, StructOpt};
+use proglog::{CountFormatterKind, ProgLog, ProgLogBuilder};
+use rayon::{prelude::*, Scope};
+use seq_io::fastq::{self, OwnedRecord, Record};
+use structopt::{clap::AppSettings, StructOpt};
 
 /// The number of reads in a chunk
 const CHUNKSIZE: usize = 5000; // * num_cpus::get();
@@ -33,31 +31,9 @@ const CHUNKSIZE: usize = 5000; // * num_cpus::get();
 const READER_CHANNEL_SIZE: usize = 100;
 const WRITER_CHANNEL_SIZE: usize = 2000;
 
-const REF_PREFIX: &str = "REF";
-const ALT_PREFIX: &str = "ALT";
-const BOTH_PREFIX: &str = "BOTH";
-
-/// Helper type to represent the accumlated reads and what match type they are.
-///
-/// `p` are ref reads
-/// `1` are alt reads
-/// `2` are reads that matched both
-type MatchedReads = (
-    (Vec<OwnedRecord>, Vec<OwnedRecord>),
-    (Vec<OwnedRecord>, Vec<OwnedRecord>),
-    (Vec<OwnedRecord>, Vec<OwnedRecord>),
-);
-
 lazy_static! {
     /// Return the number of cpus as a String
     pub static ref NUM_CPU: String = num_cpus::get().to_string();
-}
-
-lazy_static! {
-    static ref R1_REGEX: Regex = RegexBuilder::new(r"r1")
-        .case_insensitive(true)
-        .build()
-        .expect("Failed to compile R1 regex");
 }
 
 pub mod built_info {
@@ -88,178 +64,31 @@ pub mod built_info {
     }
 }
 
-lazy_static! {
-    static ref COMPLEMENT: [u8; 256] = {
-        let mut comp = [0; 256];
-        for (v, a) in comp.iter_mut().enumerate() {
-            *a = v as u8;
-        }
-        for (&a, &b) in b"AGCTYRWSKMDVHBN".iter().zip(b"TCGARYWSMKHBDVN".iter()) {
-            comp[a as usize] = b;
-            comp[a as usize + 32] = b + 32;  // lowercase variants
-        }
-        comp
-    };
-}
-
-fn complement(a: u8) -> u8 {
-    COMPLEMENT[a as usize]
-}
-
-fn revcomp<C, T>(text: T) -> Vec<u8>
-where
-    C: Borrow<u8>,
-    T: IntoIterator<Item = C>,
-    T::IntoIter: DoubleEndedIterator,
-{
-    text.into_iter()
-        .rev()
-        .map(|a| complement(*a.borrow()))
-        .collect()
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct FqGrepMetrics {
-    total_alt_reads_found: usize,
-    total_ref_reads_found: usize,
-    total_both_reads_found: usize,
-    total_reads_found: usize,
-}
-
-impl FqGrepMetrics {
-    fn new(
-        total_ref_reads_found: usize,
-        total_alt_reads_found: usize,
-        total_both_reads_found: usize,
-    ) -> Self {
-        Self {
-            total_ref_reads_found,
-            total_alt_reads_found,
-            total_both_reads_found,
-            total_reads_found: total_alt_reads_found
-                + total_both_reads_found
-                + total_ref_reads_found,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-struct Sample {
-    name: String,
-}
-
-impl Sample {
-    fn new(name: String) -> Self {
-        Self { name }
-    }
-
-    fn from_r1_path<P: AsRef<Path>>(r1_path: P, prefix: &str) -> Result<Self> {
-        let filename = r1_path
-            .as_ref()
-            .file_name()
-            .expect("Unable to extract file name from R1")
-            .to_string_lossy();
-        let parts: Vec<&str> = R1_REGEX.splitn(&filename, 2).collect();
-        if let Some(&part) = parts.first() {
-            let name: &str = &part[0..part.len() - 1];
-            Ok(Self::new(format!("{}_{}", prefix, name.to_owned())))
-        } else {
-            Err(Error::msg("Unable to extract a sample name from R1 path"))
-        }
-    }
-
-    fn filenames<P: AsRef<Path>>(&self, dir: P, illumina: bool) -> (PathBuf, PathBuf) {
-        if illumina {
-            (
-                dir.as_ref()
-                    .join(format!("{}_S1_L001_R1_001.fastq.gz", self.name)),
-                dir.as_ref()
-                    .join(format!("{}_S1_L001_R2_001.fastq.gz", self.name)),
-            )
-        } else {
-            (
-                dir.as_ref().join(format!("{}.R1.fastq.gz", self.name)),
-                dir.as_ref().join(format!("{}.R2.fastq.gz", self.name)),
-            )
-        }
-    }
-}
-
-struct WriterStats {
-    reads_written: usize,
-}
-
-impl WriterStats {
-    fn new() -> Self {
-        Self { reads_written: 0 }
-    }
-}
-
-struct ThreadWriter {
-    handle: JoinHandle<WriterStats>,
-    tx: Option<Sender<Vec<OwnedRecord>>>,
-}
-
-impl ThreadWriter {
-    fn new(mut writer: ZWriterWrapper) -> Self {
-        // TODO: try making this unbounded
-        let (tx, rx): (Sender<Vec<OwnedRecord>>, Receiver<Vec<OwnedRecord>>) =
-            bounded(WRITER_CHANNEL_SIZE);
-        let handle = std::thread::spawn(move || {
-            let mut writer_stats = WriterStats::new();
-            while let Ok(reads) = rx.recv() {
-                for read in reads {
-                    writer_stats.reads_written += 1;
-                    fastq::write_to(&mut writer.0, &read.head, &read.seq, &read.qual)
-                        .expect("failed writing read");
-                }
-            }
-            writer.0.finish().expect("Error flushing writer");
-            writer_stats
-        });
-        Self {
-            handle,
-            tx: Some(tx),
-        }
-    }
-}
-struct SampleWriter {
-    r1: ThreadWriter, // + Send
-    r2: ThreadWriter, // + Send
+struct FastqWriter {
+    tx: Sender<Vec<OwnedRecord>>,
     lock: Mutex<()>,
 }
 
-impl SampleWriter {
-    fn new<P: AsRef<Path>>(
-        sample: &Sample,
-        dir: P,
-        compression_threads: usize,
-        illumina: bool,
-    ) -> Result<Self> {
-        let (r1, r2) = sample.filenames(dir, illumina);
-
-        let r1_writer = ZBuilder::<Bgzf, _>::new()
-            .num_threads(compression_threads)
-            .compression_level(Compression::new(2))
-            .from_writer(BufWriter::with_capacity(BUFSIZE, File::create(r1)?));
-        let r1 = ThreadWriter::new(ZWriterWrapper(r1_writer));
-
-        let r2_writer = ZBuilder::<Bgzf, _>::new()
-            .num_threads(compression_threads)
-            .compression_level(Compression::new(2))
-            .from_writer(BufWriter::with_capacity(BUFSIZE, File::create(r2)?));
-        let r2 = ThreadWriter::new(ZWriterWrapper(r2_writer));
+impl FastqWriter {
+    fn new(pool: &Scope) -> Self {
         let lock = Mutex::new(());
+        let mut writer = BufWriter::with_capacity(BUFSIZE, std::io::stdout());
+        // TODO: try making this unbounded
+        let (tx, rx): (Sender<Vec<OwnedRecord>>, Receiver<Vec<OwnedRecord>>) =
+            bounded(WRITER_CHANNEL_SIZE);
+        pool.spawn(move |_| {
+            while let Ok(reads) = rx.recv() {
+                for read in reads {
+                    fastq::write_to(&mut writer, &read.head, &read.seq, &read.qual)
+                        .expect("failed writing read");
+                }
+            }
+            writer.flush().expect("Error flushing writer");
+        });
 
-        Ok(Self { r1, r2, lock })
+        Self { tx, lock }
     }
 }
-
-struct ZWriterWrapper(Box<dyn ZWriter>);
-
-// TODO: make ZWriter's return type be Send
-unsafe impl Send for ZWriterWrapper {}
-unsafe impl Sync for ZWriterWrapper {}
 
 struct ThreadReader {
     handle: JoinHandle<()>,
@@ -270,92 +99,152 @@ impl ThreadReader {
     fn new(file: PathBuf) -> Self {
         let (tx, rx) = bounded(READER_CHANNEL_SIZE);
         let handle = std::thread::spawn(move || {
-            let reader = fastq::Reader::with_capacity(
-                MultiGzDecoder::new(BufReader::with_capacity(
+            // TODO: make the types work so we can remove duplicate code here and below
+            if file == PathBuf::from_str("-").unwrap() {
+                let handle = BufReader::with_capacity(BUFSIZE, std::io::stdin());
+                let reader = fastq::Reader::with_capacity(MultiGzDecoder::new(handle), BUFSIZE)
+                    .into_records()
+                    .chunks(CHUNKSIZE * num_cpus::get());
+                let chunks = reader.into_iter();
+                for chunk in chunks {
+                    // let now = std::time::Instant::now();
+                    tx.send(chunk.map(|r| r.expect("Error reading")).collect())
+                        .expect("Error sending");
+                }
+            } else {
+                let handle = BufReader::with_capacity(
                     BUFSIZE,
                     File::open(&file).expect("error in opening file"),
-                )),
-                BUFSIZE,
-            )
-            .into_records()
-            .chunks(CHUNKSIZE * num_cpus::get());
-            let chunks = reader.into_iter();
-
-            for chunk in chunks {
-                // let now = std::time::Instant::now();
-                tx.send(chunk.map(|r| r.expect("Error reading")).collect())
-                    .expect("Error sending");
-            }
+                );
+                let reader = fastq::Reader::with_capacity(MultiGzDecoder::new(handle), BUFSIZE)
+                    .into_records()
+                    .chunks(CHUNKSIZE * num_cpus::get());
+                let chunks = reader.into_iter();
+                for chunk in chunks {
+                    // let now = std::time::Instant::now();
+                    tx.send(chunk.map(|r| r.expect("Error reading")).collect())
+                        .expect("Error sending");
+                }
+            };
         });
 
         Self { handle, rx }
     }
 }
 
-#[derive(Debug, PartialEq, PartialOrd)]
-enum Matches {
-    Ref,
-    Alt,
-    Both,
-    None,
-}
-
 /// A small utility to "grep" a pair of gzipped FASTQ files, outputting the read pair if the sequence
 /// matches either the given ref sequence, the given alt sequence, or both.
 #[derive(StructOpt, Debug)]
-#[structopt(name = "fqgrep", global_setting(ColoredHelp), version = built_info::VERSION.as_str())]
+#[structopt(
+    name = "fqgrep", 
+    global_setting(AppSettings::ColoredHelp),
+    global_setting(AppSettings::DeriveDisplayOrder),
+    version = built_info::VERSION.as_str())
+ ]
+#[allow(clippy::struct_excessive_bools)]
 struct Opts {
-    /// Path to the input R1 gzipped FASTQ
-    #[structopt(long, short = "1", display_order = 1)]
-    r1_fastq: PathBuf,
-
-    /// Path to the input R2 gzipped FASTQ
-    #[structopt(long, short = "2", display_order = 2)]
-    r2_fastq: PathBuf,
-
-    /// The output directory to write to.
-    ///
-    /// `fqgrep` will write a pair of fastqs for the alt matched reads to: {output_dir}/ALT_{sample_name}R{1,2}.fastq.gz
-    /// and the fastqs for the ref matched reads to {output_dir}/REF_{sample_name}R{1,2}.fastq.gz
-    #[structopt(long, short = "o", display_order = 3)]
-    output_dir: PathBuf,
-
-    /// The "ref" search sequence to grep for, for R2 reads the search sequence is reverse complemented.
-    #[structopt(long, short = "r", display_order = 4)]
-    ref_search_sequence: String,
-
-    /// The "alt" search sequence to grep for, for R2 reads the search sequence is reverse complemented.
-    #[structopt(long, short = "a", display_order = 5)]
-    alt_search_sequence: String,
-
     /// The number of threads to use for matching reads against pattern
-    ///
-    /// Keep in mind that there is are two reader threads and two writer threads created by default.
-    #[structopt(long, short = "t", default_value = NUM_CPU.as_str(), display_order = 6)]
-    threads_for_matching: usize,
+    #[structopt(long, short = "t", default_value = NUM_CPU.as_str())]
+    threads: usize,
 
-    /// Number of threads to use for compression.
-    ///
-    /// Zero is probably the correct answer if the searched sequence is relatively rare.
-    /// If it's common and many reads will be written, it may be worth decreasing the number of
-    /// `treads_for_matching` by a small number and making this number > 2
-    #[structopt(long, short = "c", default_value = "0", display_order = 7)]
-    compression_threads: usize,
+    /// Treat the input files as paired.  The number of input files must be a multiple of two,
+    /// with the first file being R1, second R2, third R1, fourth R2, and so on.  If the pattern
+    /// matches either R1 or R2, then both R1 and R2 will be output (interleaved).
+    #[structopt(long)]
+    paired: bool,
 
-    /// True to name output FASTQs based on Illumin's FASTQ file name convetions.
-    ///
-    /// If true, will use the file name pattern "<Sample Name>_S1_L001_R<1 or 2>_001.fastq.gz".
-    /// Otherwise, will use "<Sample Name>.R<1 or 2>.fastq.gz"
-    #[structopt(long, short = "I", display_order = 8)]
-    illumina: bool,
+    /// Specify a pattern used during the search of the input: an input line is selected if it
+    /// matches any of the specified patterns.  This option is most useful when multiple `-e`
+    /// options are used to specify multiple patterns.
+    #[structopt(long, short = "e")]
+    regexp: Vec<String>,
+
+    // Interpret pattern as a set of fixed strings
+    #[structopt(long, short = "F")]
+    fixed_strings: bool,
+
+    /// Read one or more newline separated patterns from file.  Empty pattern lines match every
+    /// input line.  Newlines are not considered part of a pattern.  If file is empty, nothing
+    /// is matched.
+    #[structopt(long, short = "f")]
+    file: Option<PathBuf>,
+
+    /// Search the reverse complement for matches.
+    #[structopt(long)]
+    reverse_complement: bool,
+
+    /// Selected lines are those not matching any of the specified patterns
+    #[structopt(short = "v")]
+    invert_match: bool,
+
+    /// The first argument is the pattern to match, with the remaining arguments containing the
+    /// files to match.  If `-e` is given, then all the arguments are files to match.
+    /// Use standard input if either no files are given or `-` is given.
+    args: Vec<String>,
 }
 
-#[derive(Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
-struct Barcode<'a>(&'a [u8], &'a [u8]);
+fn read_patterns(file: &PathBuf) -> Result<Vec<String>> {
+    let f = File::open(&file).expect("error in opening file");
+    let r = BufReader::new(f);
+    let mut v = Vec::new();
+    for result in r.lines() {
+        v.push(result?);
+    }
+    Ok(v)
+}
 
 #[allow(clippy::too_many_lines)]
 fn main() -> Result<()> {
-    let opts = setup();
+    let mut opts = setup();
+
+    if let Some(file) = &opts.file {
+        for pattern in read_patterns(file)? {
+            opts.regexp.push(pattern);
+        }
+    }
+
+    let (pattern, mut files): (Option<String>, Vec<PathBuf>) = {
+        let (pattern, file_strings): (Option<String>, Vec<String>) = if opts.regexp.is_empty() {
+            ensure!(
+                !opts.args.is_empty(),
+                "Pattern must be given with -e or as the first positional argument "
+            );
+            let files = opts.args.iter().skip(1).cloned().collect();
+            (Some(opts.args[0].clone()), files)
+        } else {
+            (None, opts.args.clone())
+        };
+
+        let files = file_strings
+            .iter()
+            .map(|s| {
+                PathBuf::from_str(s)
+                    .with_context(|| format!("Cannot create a path from: {}", s))
+                    .unwrap()
+            })
+            .collect();
+        (pattern, files)
+    };
+
+    if opts.paired {
+        ensure!(
+            files.len() <= 1 || files.len() % 2 == 0,
+            "Input files must be a multiple of two, or either a single file or standard input (assume interleaved) with --paired"
+        );
+    }
+
+    if opts.fixed_strings {
+        if let Some(pattern) = &pattern {
+            FixedStringMatcher::validate(pattern)?;
+        } else if !opts.regexp.is_empty() {
+            for pattern in &opts.regexp {
+                FixedStringMatcher::validate(pattern)?;
+            }
+        } else {
+            bail!("A pattern must be given as a positional argument or with -e/--regexp")
+        }
+    }
+
     let progress_logger = ProgLogBuilder::new()
         .name("fqgrep-progress")
         .noun("reads")
@@ -364,194 +253,119 @@ fn main() -> Result<()> {
         .count_formatter(CountFormatterKind::Comma)
         .build();
 
-    let ref_sample = Sample::from_r1_path(&opts.r1_fastq, REF_PREFIX)?;
-    let alt_sample = Sample::from_r1_path(&opts.r1_fastq, ALT_PREFIX)?;
-    let both_sample = Sample::from_r1_path(&opts.r1_fastq, BOTH_PREFIX)?;
-
-    // Create the output directory
-    fs::create_dir_all(&opts.output_dir)?;
-
-    let mut ref_writer = SampleWriter::new(
-        &ref_sample,
-        &opts.output_dir,
-        opts.compression_threads,
-        opts.illumina,
-    )?;
-    let mut alt_writer = SampleWriter::new(
-        &alt_sample,
-        &opts.output_dir,
-        opts.compression_threads,
-        opts.illumina,
-    )?;
-    let mut both_writer = SampleWriter::new(
-        &both_sample,
-        &opts.output_dir,
-        opts.compression_threads,
-        opts.illumina,
-    )?;
-
     let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(opts.threads_for_matching)
+        .num_threads(opts.threads)
         .build()
         .unwrap();
 
-    // TODO: make sure errors aren't being eaten
-    info!("Creating reader threads");
-    let r1_reader = ThreadReader::new(opts.r1_fastq.clone());
-    let r2_reader = ThreadReader::new(opts.r2_fastq.clone());
+    pool.scope(|s| {
+        let match_opts = MatcherOpts {
+            invert_match: opts.invert_match,
+            reverse_complement: opts.reverse_complement,
+        };
+        let matcher: Box<dyn Matcher + Sync> = match (opts.fixed_strings, &pattern) {
+            (true, Some(pattern)) => Box::new(FixedStringMatcher::new(pattern, match_opts)),
+            (false, Some(pattern)) => Box::new(RegexMatcher::new(pattern, match_opts)),
+            (true, None) => Box::new(FixedStringSetMatcher::new(&opts.regexp, match_opts)),
+            (false, None) => Box::new(RegexSetMatcher::new(&opts.regexp, match_opts)),
+        };
+        let writer = FastqWriter::new(s);
 
-    let ref_forward_seq = opts.ref_search_sequence.as_bytes();
-    let ref_revcomp_seq = revcomp(ref_forward_seq);
-    let alt_forward_seq = opts.alt_search_sequence.as_bytes();
-    let alt_revcomp_seq = revcomp(alt_forward_seq);
+        if opts.paired {
+            if files.is_empty() {
+                // read from standad input
+                files.push(PathBuf::from_str("-").unwrap());
+            }
+            if files.len() == 1 {
+                // interleaved paired end FASTQ
+                let reader = ThreadReader::new(files[0].clone());
+                for reads in izip!(reader.rx.iter()) {
+                    let paired_reads = reads
+                        .into_iter()
+                        .tuples::<(OwnedRecord, OwnedRecord)>()
+                        .collect_vec();
+                    process_paired_reads(paired_reads, &matcher, &writer, &progress_logger);
+                }
+            } else {
+                // pairs of FASTQ files
+                for file_pairs in files.chunks_exact(2) {
+                    let reader1 = ThreadReader::new(file_pairs[0].clone());
+                    let reader2 = ThreadReader::new(file_pairs[1].clone());
+                    for (reads1, reads2) in izip!(reader1.rx.iter(), reader2.rx.iter()) {
+                        let paired_reads = reads1.into_iter().zip(reads2.into_iter()).collect_vec();
+                        process_paired_reads(paired_reads, &matcher, &writer, &progress_logger);
+                    }
+                    reader1.handle.join().expect("Failed to join reader");
+                    reader2.handle.join().expect("Failed to join reader");
+                }
+            }
+        } else {
+            if files.is_empty() {
+                // read from standad input
+                files.push(PathBuf::from_str("-").unwrap());
+            }
+            for file in files {
+                let reader = ThreadReader::new(file.clone());
+                for reads in reader.rx.iter() {
+                    // Get the amtches reads
+                    let matched_reads: Vec<OwnedRecord> = reads
+                        .into_par_iter()
+                        .map(|read| -> Option<OwnedRecord> {
+                            progress_logger.record();
+                            if matcher.read_match(&read) {
+                                Some(read)
+                            } else {
+                                None
+                            }
+                        })
+                        .flatten()
+                        .collect();
 
-    info!("Processing reads");
-    pool.install(|| {
-        for (r1_super, r2_super) in izip!(r1_reader.rx.iter(), r2_reader.rx.iter()) {
-            (r1_super, r2_super)
-                .into_par_iter()
-                .map(|(r1, r2)| {
-                    let ref_match = r1.seq.find(ref_forward_seq).is_some()
-                        || r1.seq.find(&ref_revcomp_seq).is_some()
-                        || r2.seq.find(ref_forward_seq).is_some()
-                        || r2.seq.find(&ref_revcomp_seq).is_some();
-                    let alt_match = r1.seq.find(alt_forward_seq).is_some()
-                        || r1.seq.find(&alt_revcomp_seq).is_some()
-                        || r2.seq.find(alt_forward_seq).is_some()
-                        || r2.seq.find(&alt_revcomp_seq).is_some();
-                    let m = match (ref_match, alt_match) {
-                        (true, true) => Matches::Both,
-                        (true, false) => Matches::Ref,
-                        (false, true) => Matches::Alt,
-                        (false, false) => Matches::None,
-                    };
-                    progress_logger.record();
-                    (m, (r1, r2))
-                })
-                .filter(|(m, _)| *m != Matches::None)
-                .fold(
-                    || ((vec![], vec![]), (vec![], vec![]), (vec![], vec![])),
-                    |(mut ref_reads, mut alt_reads, mut both_reads): MatchedReads,
-                     (match_type, (r1, r2)): (Matches, (OwnedRecord, OwnedRecord))| {
-                        match match_type {
-                            Matches::Ref => {
-                                ref_reads.0.push(r1);
-                                ref_reads.1.push(r2);
-                            }
-                            Matches::Alt => {
-                                alt_reads.0.push(r1);
-                                alt_reads.1.push(r2);
-                            }
-                            Matches::Both => {
-                                both_reads.0.push(r1);
-                                both_reads.1.push(r2);
-                            }
-                            _ => unreachable!()
-                        }
-                        (ref_reads, alt_reads, both_reads)
-                    },
-                )
-                .for_each(
-                    |(ref_reads, alt_reads, both_reads): MatchedReads| {
-                        // Acquire lock to ensure R1 and R2 are enqueued at the same time
-                        {
-                            let _lock = ref_writer.lock.lock();
-                            ref_writer.r1.tx.as_ref().unwrap().send(ref_reads.0).expect("Failed to send R1s");
-                            ref_writer.r2.tx.as_ref().unwrap().send(ref_reads.1).expect("Failed to send R1s");
-                        }
-                        {
-                            let _lock = alt_writer.lock.lock();
-                            alt_writer.r1.tx.as_ref().unwrap().send(alt_reads.0).expect("Failed to send R1s");
-                            alt_writer.r2.tx.as_ref().unwrap().send(alt_reads.1).expect("Failed to send R1s");
-                        }
-                        {
-                            let _lock = both_writer.lock.lock();
-                            both_writer.r1.tx.as_ref().unwrap().send(both_reads.0).expect("Failed to send R1s");
-                            both_writer.r2.tx.as_ref().unwrap().send(both_reads.1).expect("Failed to send R1s");
-                        }
-                    },
-                );
+                    let _lock = writer.lock.lock();
+                    writer.tx.send(matched_reads).expect("Failed to send read");
+                }
+
+                reader.handle.join().expect("Failed to join reader");
+            }
         }
     });
 
-    info!("Joining reader threads");
-    r1_reader.handle.join().expect("Failed to join r1");
-    r2_reader.handle.join().expect("Failed to join r2");
-
-    // Flush and close writers
-    info!("Joining writer threads and collecting stats");
-    while !ref_writer.r1.tx.as_ref().unwrap().is_empty() {}
-    while !ref_writer.r2.tx.as_ref().unwrap().is_empty() {}
-    ref_writer.r1.tx.take();
-    ref_writer.r2.tx.take();
-    let ref_r1_stats = ref_writer
-        .r1
-        .handle
-        .join()
-        .expect("Error joining r1 handle");
-    let _ref_r2_stats = ref_writer
-        .r2
-        .handle
-        .join()
-        .expect("Error joining r2 handle");
-    while !alt_writer.r1.tx.as_ref().unwrap().is_empty() {}
-    while !alt_writer.r2.tx.as_ref().unwrap().is_empty() {}
-    alt_writer.r1.tx.take();
-    alt_writer.r2.tx.take();
-    let alt_r1_stats = alt_writer
-        .r1
-        .handle
-        .join()
-        .expect("Error joining r1 handle");
-    let _alt_r2_stats = alt_writer
-        .r2
-        .handle
-        .join()
-        .expect("Error joining r2 handle");
-    while !both_writer.r1.tx.as_ref().unwrap().is_empty() {}
-    while !both_writer.r2.tx.as_ref().unwrap().is_empty() {}
-    both_writer.r1.tx.take();
-    both_writer.r2.tx.take();
-    let both_r1_stats = both_writer
-        .r1
-        .handle
-        .join()
-        .expect("Error joining r1 handle");
-    let _both_r2_stats = both_writer
-        .r2
-        .handle
-        .join()
-        .expect("Error joining r2 handle");
-    drop(progress_logger);
-    info!(
-        "{} reads matched input ref sequence",
-        ref_r1_stats.reads_written
-    );
-    info!(
-        "{} reads matched input alt sequence",
-        alt_r1_stats.reads_written
-    );
-    info!(
-        "{} reads matched both input ref and alt sequences",
-        both_r1_stats.reads_written
-    );
-
-    info!("Writing stats");
-    let fq_grep_metrics = FqGrepMetrics::new(
-        ref_r1_stats.reads_written,
-        alt_r1_stats.reads_written,
-        both_r1_stats.reads_written,
-    );
-
-    let writer = BufWriter::new(File::create(opts.output_dir.join("fqgrep_stats.tsv"))?);
-    let mut writer = csv::WriterBuilder::new()
-        .delimiter(b'\t')
-        .has_headers(true)
-        .from_writer(writer);
-    writer.serialize(fq_grep_metrics)?;
-    writer.flush()?;
-
     Ok(())
+}
+
+fn process_paired_reads(
+    reads: Vec<(OwnedRecord, OwnedRecord)>,
+    matcher: &Box<dyn Matcher + Sync>,
+    writer: &FastqWriter,
+    progress_logger: &ProgLog,
+) {
+    reads
+        .into_par_iter()
+        .map(|(read1, read2)| {
+            progress_logger.record();
+            progress_logger.record();
+            assert!(
+                read1.head() == read2.head(),
+                "Mismatching read pair!  R1: {} R2: {}",
+                std::str::from_utf8(read1.head()).unwrap(),
+                std::str::from_utf8(read2.head()).unwrap()
+            );
+            if matcher.read_match(&read1) && matcher.read_match(&read2) {
+                Some((read1, read2))
+            } else {
+                None
+            }
+        })
+        .flatten()
+        .fold(std::vec::Vec::new, |mut matched_reads, (r1, r2)| {
+            matched_reads.push(r1);
+            matched_reads.push(r2);
+            matched_reads
+        })
+        .for_each(|matched_read| {
+            let _lock = writer.lock.lock();
+            writer.tx.send(matched_read).expect("Failed to send read");
+        });
 }
 
 /// Parse args and set up logging / tracing
