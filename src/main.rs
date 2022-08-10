@@ -333,6 +333,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::borrowed_box)] // FIXME: remove me later and solve
 fn process_paired_reads(
     reads: Vec<(OwnedRecord, OwnedRecord)>,
     matcher: &Box<dyn Matcher + Sync>,
