@@ -111,22 +111,30 @@ struct ThreadReader {
 }
 
 impl ThreadReader {
-    fn new(file: PathBuf) -> Self {
+    fn new(file: PathBuf, plain: bool) -> Self {
         let (tx, rx) = bounded(READER_CHANNEL_SIZE);
         let handle = std::thread::spawn(move || {
-            let handle = if file == PathBuf::from_str("-").unwrap() {
+            // Open the file or standad input
+            let raw_handle = if file == PathBuf::from_str("-").unwrap() {
                 Box::new(std::io::stdin()) as Box<dyn Read>
             } else {
                 let handle = File::open(&file).expect("error in opening file");
                 Box::new(handle) as Box<dyn Read>
             };
-            let buf_reader = BufReader::with_capacity(BUFSIZE, handle);
-            let gz_reader = fastq::Reader::with_capacity(MultiGzDecoder::new(buf_reader), BUFSIZE)
+            // Wrap it in a buffer
+            let buf_handle = BufReader::with_capacity(BUFSIZE, raw_handle);
+            // Maybe wrap it in a decompressor
+            let maybe_decoder_handle = if plain {
+                Box::new(buf_handle) as Box<dyn Read>
+            } else {
+                Box::new(MultiGzDecoder::new(buf_handle)) as Box<dyn Read>
+            };
+            // Open a FASTQ reader, get an iterator over the records, and chunk them
+            let fastq_reader = fastq::Reader::with_capacity(maybe_decoder_handle, BUFSIZE)
                 .into_records()
                 .chunks(CHUNKSIZE * num_cpus::get());
-            let chunks = gz_reader.into_iter();
-            for chunk in chunks {
-                // let now = std::time::Instant::now();
+            // Iterate over the chunks
+            for chunk in &fastq_reader {
                 tx.send(chunk.map(|r| r.expect("Error reading")).collect())
                     .expect("Error sending");
             }
@@ -190,9 +198,15 @@ struct Opts {
     #[structopt(long)]
     progress: bool,
 
+    /// The input FASTQ(s) is not compressed
+    #[structopt(long)]
+    plain: bool,
+
     /// The first argument is the pattern to match, with the remaining arguments containing the
     /// files to match.  If `-e` is given, then all the arguments are files to match.
     /// Use standard input if either no files are given or `-` is given.
+    ///
+    /// Input files must be gzip compressed unless `--plain` is given
     args: Vec<String>,
 }
 
@@ -297,7 +311,7 @@ fn main() -> Result<()> {
             }
             if files.len() == 1 {
                 // interleaved paired end FASTQ
-                let reader = ThreadReader::new(files[0].clone());
+                let reader = ThreadReader::new(files[0].clone(), opts.plain);
                 for reads in izip!(reader.rx.iter()) {
                     let paired_reads = reads
                         .into_iter()
@@ -308,8 +322,8 @@ fn main() -> Result<()> {
             } else {
                 // pairs of FASTQ files
                 for file_pairs in files.chunks_exact(2) {
-                    let reader1 = ThreadReader::new(file_pairs[0].clone());
-                    let reader2 = ThreadReader::new(file_pairs[1].clone());
+                    let reader1 = ThreadReader::new(file_pairs[0].clone(), opts.plain);
+                    let reader2 = ThreadReader::new(file_pairs[1].clone(), opts.plain);
                     for (reads1, reads2) in izip!(reader1.rx.iter(), reader2.rx.iter()) {
                         let paired_reads = reads1.into_iter().zip(reads2.into_iter()).collect_vec();
                         process_paired_reads(paired_reads, &matcher, &writer, &progress_logger);
@@ -324,7 +338,7 @@ fn main() -> Result<()> {
                 files.push(PathBuf::from_str("-").unwrap());
             }
             for file in files {
-                let reader = ThreadReader::new(file.clone());
+                let reader = ThreadReader::new(file.clone(), opts.plain);
                 for reads in reader.rx.iter() {
                     // Get the matched reads
                     let matched_reads: Vec<OwnedRecord> = reads
