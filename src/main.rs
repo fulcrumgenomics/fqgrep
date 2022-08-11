@@ -21,7 +21,7 @@ use itertools::{self, izip, Itertools};
 use lazy_static::lazy_static;
 use parking_lot::Mutex;
 use proglog::{CountFormatterKind, ProgLog, ProgLogBuilder};
-use rayon::{prelude::*, Scope};
+use rayon::{prelude::*, Scope, ThreadPool};
 use seq_io::fastq::{self, OwnedRecord, Record};
 use structopt::{clap::AppSettings, StructOpt};
 
@@ -70,12 +70,12 @@ struct FastqWriter {
 }
 
 impl FastqWriter {
-    fn new(pool: &Scope, count: bool, paired: bool) -> Self {
+    fn new(pool: &ThreadPool, count: bool, paired: bool) -> Self {
         // TODO: try making this unbounded
         let (tx, rx): (Sender<Vec<OwnedRecord>>, Receiver<Vec<OwnedRecord>>) =
             bounded(WRITER_CHANNEL_SIZE);
         if count {
-            pool.spawn(move |_| {
+            pool.spawn(move || {
                 let mut num_matches = 0;
                 while let Ok(reads) = rx.recv() {
                     num_matches += reads.len();
@@ -83,13 +83,12 @@ impl FastqWriter {
                 if paired {
                     num_matches /= 2;
                 }
-                // TODO: count should be divided by two for paired end reads
                 std::io::stdout()
                     .write_all(format!("{}\n", num_matches).as_bytes())
                     .unwrap();
             });
         } else {
-            pool.spawn(move |_| {
+            pool.spawn(move || {
                 let mut writer = BufWriter::with_capacity(BUFSIZE, std::io::stdout());
                 while let Ok(reads) = rx.recv() {
                     for read in reads {
@@ -115,10 +114,12 @@ impl ThreadReader {
         let (tx, rx) = bounded(READER_CHANNEL_SIZE);
         let handle = std::thread::spawn(move || {
             // Open the file or standad input
-            let raw_handle = if file == PathBuf::from_str("-").unwrap() {
+            let raw_handle = if file.as_os_str() == "-" {
                 Box::new(std::io::stdin()) as Box<dyn Read>
             } else {
-                let handle = File::open(&file).expect("error in opening file");
+                let handle = File::open(&file)
+                    .with_context(|| format!("Error opening input: {}", file.display()))
+                    .unwrap();
                 Box::new(handle) as Box<dyn Read>
             };
             // Wrap it in a buffer
@@ -291,7 +292,9 @@ fn main() -> Result<()> {
         .build()
         .unwrap();
 
-    pool.scope(|s| {
+    let writer = FastqWriter::new(&pool, opts.count, opts.paired);
+
+    pool.install(|| {
         let match_opts = MatcherOpts {
             invert_match: opts.invert_match,
             reverse_complement: opts.reverse_complement,
@@ -302,7 +305,6 @@ fn main() -> Result<()> {
             (true, None) => Box::new(FixedStringSetMatcher::new(&opts.regexp, match_opts)),
             (false, None) => Box::new(RegexSetMatcher::new(&opts.regexp, match_opts)),
         };
-        let writer = FastqWriter::new(s, opts.count, opts.paired);
 
         if opts.paired {
             if files.is_empty() {
@@ -319,6 +321,7 @@ fn main() -> Result<()> {
                         .collect_vec();
                     process_paired_reads(paired_reads, &matcher, &writer, &progress_logger);
                 }
+                reader.handle.join().expect("Failed to join reader");
             } else {
                 // pairs of FASTQ files
                 for file_pairs in files.chunks_exact(2) {
@@ -365,6 +368,8 @@ fn main() -> Result<()> {
         }
     });
 
+    while !writer.tx.is_empty() {}
+
     Ok(())
 }
 
@@ -388,7 +393,7 @@ fn process_paired_reads(
                 std::str::from_utf8(read1.head()).unwrap(),
                 std::str::from_utf8(read2.head()).unwrap()
             );
-            if matcher.read_match(&read1) && matcher.read_match(&read2) {
+            if matcher.read_match(&read1) || matcher.read_match(&read2) {
                 Some((read1, read2))
             } else {
                 None
