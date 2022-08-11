@@ -6,7 +6,6 @@ use std::{
     io::{BufRead, BufReader, BufWriter, Read, Write},
     path::PathBuf,
     str::FromStr,
-    thread::JoinHandle,
 };
 
 use anyhow::{bail, ensure, Context, Result};
@@ -21,7 +20,7 @@ use itertools::{self, izip, Itertools};
 use lazy_static::lazy_static;
 use parking_lot::Mutex;
 use proglog::{CountFormatterKind, ProgLog, ProgLogBuilder};
-use rayon::{prelude::*, Scope, ThreadPool};
+use rayon::{prelude::*, ThreadPool};
 use seq_io::fastq::{self, OwnedRecord, Record};
 use structopt::{clap::AppSettings, StructOpt};
 
