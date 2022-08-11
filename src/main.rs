@@ -3,7 +3,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use std::{
     fs::File,
-    io::{BufRead, BufReader, BufWriter, Write},
+    io::{BufRead, BufReader, BufWriter, Read, Write},
     path::PathBuf,
     str::FromStr,
     thread::JoinHandle,
@@ -114,33 +114,22 @@ impl ThreadReader {
     fn new(file: PathBuf) -> Self {
         let (tx, rx) = bounded(READER_CHANNEL_SIZE);
         let handle = std::thread::spawn(move || {
-            // TODO: make the types work so we can remove duplicate code here and below
-            if file == PathBuf::from_str("-").unwrap() {
-                let handle = BufReader::with_capacity(BUFSIZE, std::io::stdin());
-                let reader = fastq::Reader::with_capacity(MultiGzDecoder::new(handle), BUFSIZE)
-                    .into_records()
-                    .chunks(CHUNKSIZE * num_cpus::get());
-                let chunks = reader.into_iter();
-                for chunk in chunks {
-                    // let now = std::time::Instant::now();
-                    tx.send(chunk.map(|r| r.expect("Error reading")).collect())
-                        .expect("Error sending");
-                }
+            let handle = if file == PathBuf::from_str("-").unwrap() {
+                Box::new(std::io::stdin()) as Box<dyn Read>
             } else {
-                let handle = BufReader::with_capacity(
-                    BUFSIZE,
-                    File::open(&file).expect("error in opening file"),
-                );
-                let reader = fastq::Reader::with_capacity(MultiGzDecoder::new(handle), BUFSIZE)
-                    .into_records()
-                    .chunks(CHUNKSIZE * num_cpus::get());
-                let chunks = reader.into_iter();
-                for chunk in chunks {
-                    // let now = std::time::Instant::now();
-                    tx.send(chunk.map(|r| r.expect("Error reading")).collect())
-                        .expect("Error sending");
-                }
+                let handle = File::open(&file).expect("error in opening file");
+                Box::new(handle) as Box<dyn Read>
             };
+            let buf_reader = BufReader::with_capacity(BUFSIZE, handle);
+            let gz_reader = fastq::Reader::with_capacity(MultiGzDecoder::new(buf_reader), BUFSIZE)
+                .into_records()
+                .chunks(CHUNKSIZE * num_cpus::get());
+            let chunks = gz_reader.into_iter();
+            for chunk in chunks {
+                // let now = std::time::Instant::now();
+                tx.send(chunk.map(|r| r.expect("Error reading")).collect())
+                    .expect("Error sending");
+            }
         });
 
         Self { handle, rx }
