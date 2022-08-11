@@ -1,6 +1,7 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+use std::process::ExitCode;
 use std::{
     fs::File,
     io::{BufRead, BufReader, BufWriter, Read, Write},
@@ -15,6 +16,7 @@ use flume::{bounded, Receiver, Sender};
 use fqgrep_lib::matcher::{
     FixedStringMatcher, FixedStringSetMatcher, Matcher, MatcherOpts, RegexMatcher, RegexSetMatcher,
 };
+use fqgrep_lib::{is_fastq_path, is_gzip_path};
 use gzp::BUFSIZE;
 use itertools::{self, izip, Itertools};
 use lazy_static::lazy_static;
@@ -69,7 +71,7 @@ struct FastqWriter {
 }
 
 impl FastqWriter {
-    fn new(pool: &ThreadPool, count: bool, paired: bool) -> Self {
+    fn new(count_tx: Sender<usize>, pool: &ThreadPool, count: bool, paired: bool) -> Self {
         // TODO: try making this unbounded
         let (tx, rx): (Sender<Vec<OwnedRecord>>, Receiver<Vec<OwnedRecord>>) =
             bounded(WRITER_CHANNEL_SIZE);
@@ -85,17 +87,29 @@ impl FastqWriter {
                 std::io::stdout()
                     .write_all(format!("{}\n", num_matches).as_bytes())
                     .unwrap();
+
+                count_tx
+                    .send(num_matches)
+                    .expect("failed sending final count");
             });
         } else {
             pool.spawn(move || {
+                let mut num_matches = 0;
                 let mut writer = BufWriter::with_capacity(BUFSIZE, std::io::stdout());
                 while let Ok(reads) = rx.recv() {
+                    num_matches += reads.len();
                     for read in reads {
                         fastq::write_to(&mut writer, &read.head, &read.seq, &read.qual)
                             .expect("failed writing read");
                     }
                 }
+                if paired {
+                    num_matches /= 2;
+                }
                 writer.flush().expect("Error flushing writer");
+                count_tx
+                    .send(num_matches)
+                    .expect("failed sending final count");
             });
         }
         let lock = Mutex::new(());
@@ -118,10 +132,14 @@ fn spawn_reader(file: PathBuf, plain: bool) -> Receiver<Vec<OwnedRecord>> {
         // Wrap it in a buffer
         let buf_handle = BufReader::with_capacity(BUFSIZE, raw_handle);
         // Maybe wrap it in a decompressor
-        let maybe_decoder_handle = if plain {
-            Box::new(buf_handle) as Box<dyn Read>
-        } else {
-            Box::new(MultiGzDecoder::new(buf_handle)) as Box<dyn Read>
+        let maybe_decoder_handle = {
+            // plaintext if your **not** a gzip path AND you're either a FASTQ or plain is true
+            let is_plain = !is_gzip_path(&file) && (is_fastq_path(&file) || plain);
+            if is_plain {
+                Box::new(buf_handle) as Box<dyn Read>
+            } else {
+                Box::new(MultiGzDecoder::new(buf_handle)) as Box<dyn Read>
+            }
         };
         // Open a FASTQ reader, get an iterator over the records, and chunk them
         let fastq_reader = fastq::Reader::with_capacity(maybe_decoder_handle, BUFSIZE)
@@ -136,8 +154,27 @@ fn spawn_reader(file: PathBuf, plain: bool) -> Receiver<Vec<OwnedRecord>> {
     rx
 }
 
-/// A small utility to "grep" a pair of gzipped FASTQ files, outputting the read pair if the sequence
-/// matches either the given ref sequence, the given alt sequence, or both.
+/// The fqgrep utility searches any given input FASTQ files, selecting records whose bases match
+/// one or more patterns.   By default, a pattern matches the bases in a FASTQ record if the
+/// regular expression (RE) in the pattern matches the bases.  An empty expression matches every
+/// line.  Each FASTQ record that matches at least one of the patterns is written to the standard
+/// output.
+///
+/// INPUT COMPRESSION
+///
+/// By default, the input files must be GZIP compressed. If the input files are real files and end
+/// with `.gz` or `.bgz`, they are assumed to be GZIP compressed.  If they end with `.fastq` or
+/// `.fq`, they are assumed to be plaintext (uncompressed).  All other inputs are assumed to be
+/// GZIP compressed, including standard input.  The `--plain` option may be used to treat standard
+/// input and any unrecongized inputs as plaintext (uncompressed).
+///
+/// EXIT STATUS
+///      The fqgrep utility exits with one of the following values:
+///
+///      0     One or more lines were selected.
+///      1     No lines were selected.
+///      >1    An error occurred.
+///
 #[derive(StructOpt, Debug)]
 #[structopt(
     name = "fqgrep", 
@@ -212,8 +249,31 @@ fn read_patterns(file: &PathBuf) -> Result<Vec<String>> {
     Ok(v)
 }
 
+fn main() -> ExitCode {
+    // Set the exit code:
+    // - exit code 0 if there were matches
+    // - exit code 1 if there were no matches
+    // - exit code 2 if fqgrep returned an error
+    // - exit code 101 if fqgrep panicked
+    let outer = std::panic::catch_unwind(fqgrep);
+    match outer {
+        Err(_) => {
+            eprintln!("Error: fqgrep panicked.  Please report this as a bug!");
+            ExitCode::from(101)
+        }
+        Ok(inner) => match inner {
+            Ok(0) => ExitCode::from(1),
+            Ok(_) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                ExitCode::from(2)
+            }
+        },
+    }
+}
+
 #[allow(clippy::too_many_lines)]
-fn main() -> Result<()> {
+fn fqgrep() -> Result<usize> {
     let mut opts = setup();
 
     if let Some(file) = &opts.file {
@@ -283,7 +343,8 @@ fn main() -> Result<()> {
         .build()
         .unwrap();
 
-    let writer = FastqWriter::new(&pool, opts.count, opts.paired);
+    let (count_tx, count_rx): (Sender<usize>, Receiver<usize>) = bounded(1);
+    let writer = FastqWriter::new(count_tx, &pool, opts.count, opts.paired);
 
     pool.install(|| {
         let match_opts = MatcherOpts {
@@ -354,7 +415,12 @@ fn main() -> Result<()> {
         }
     });
 
-    Ok(())
+    drop(writer); // so count_tx.send will execute
+
+    match count_rx.recv() {
+        Ok(count) => Ok(count),
+        Err(error) => Err(error).with_context(|| "failed receive final match counts"),
+    }
 }
 
 #[allow(clippy::borrowed_box)] // FIXME: remove me later and solve
