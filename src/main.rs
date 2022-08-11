@@ -104,45 +104,37 @@ impl FastqWriter {
     }
 }
 
-struct ThreadReader {
-    handle: JoinHandle<()>,
-    rx: Receiver<Vec<OwnedRecord>>,
-}
-
-impl ThreadReader {
-    fn new(file: PathBuf, plain: bool) -> Self {
-        let (tx, rx) = bounded(READER_CHANNEL_SIZE);
-        let handle = std::thread::spawn(move || {
-            // Open the file or standad input
-            let raw_handle = if file.as_os_str() == "-" {
-                Box::new(std::io::stdin()) as Box<dyn Read>
-            } else {
-                let handle = File::open(&file)
-                    .with_context(|| format!("Error opening input: {}", file.display()))
-                    .unwrap();
-                Box::new(handle) as Box<dyn Read>
-            };
-            // Wrap it in a buffer
-            let buf_handle = BufReader::with_capacity(BUFSIZE, raw_handle);
-            // Maybe wrap it in a decompressor
-            let maybe_decoder_handle = if plain {
-                Box::new(buf_handle) as Box<dyn Read>
-            } else {
-                Box::new(MultiGzDecoder::new(buf_handle)) as Box<dyn Read>
-            };
-            // Open a FASTQ reader, get an iterator over the records, and chunk them
-            let fastq_reader = fastq::Reader::with_capacity(maybe_decoder_handle, BUFSIZE)
-                .into_records()
-                .chunks(CHUNKSIZE * num_cpus::get());
-            // Iterate over the chunks
-            for chunk in &fastq_reader {
-                tx.send(chunk.map(|r| r.expect("Error reading")).collect())
-                    .expect("Error sending");
-            }
-        });
-
-        Self { handle, rx }
-    }
+fn spawn_reader(file: PathBuf, plain: bool) -> Receiver<Vec<OwnedRecord>> {
+    let (tx, rx) = bounded(READER_CHANNEL_SIZE);
+    rayon::spawn(move || {
+        // Open the file or standad input
+        let raw_handle = if file.as_os_str() == "-" {
+            Box::new(std::io::stdin()) as Box<dyn Read>
+        } else {
+            let handle = File::open(&file)
+                .with_context(|| format!("Error opening input: {}", file.display()))
+                .unwrap();
+            Box::new(handle) as Box<dyn Read>
+        };
+        // Wrap it in a buffer
+        let buf_handle = BufReader::with_capacity(BUFSIZE, raw_handle);
+        // Maybe wrap it in a decompressor
+        let maybe_decoder_handle = if plain {
+            Box::new(buf_handle) as Box<dyn Read>
+        } else {
+            Box::new(MultiGzDecoder::new(buf_handle)) as Box<dyn Read>
+        };
+        // Open a FASTQ reader, get an iterator over the records, and chunk them
+        let fastq_reader = fastq::Reader::with_capacity(maybe_decoder_handle, BUFSIZE)
+            .into_records()
+            .chunks(CHUNKSIZE * num_cpus::get());
+        // Iterate over the chunks
+        for chunk in &fastq_reader {
+            tx.send(chunk.map(|r| r.expect("Error reading")).collect())
+                .expect("Error sending");
+        }
+    });
+    rx
 }
 
 /// A small utility to "grep" a pair of gzipped FASTQ files, outputting the read pair if the sequence
@@ -313,26 +305,23 @@ fn main() -> Result<()> {
             }
             if files.len() == 1 {
                 // interleaved paired end FASTQ
-                let reader = ThreadReader::new(files[0].clone(), opts.plain);
-                for reads in izip!(reader.rx.iter()) {
+                let rx = spawn_reader(files[0].clone(), opts.plain);
+                for reads in izip!(rx.iter()) {
                     let paired_reads = reads
                         .into_iter()
                         .tuples::<(OwnedRecord, OwnedRecord)>()
                         .collect_vec();
                     process_paired_reads(paired_reads, &matcher, &writer, &progress_logger);
                 }
-                reader.handle.join().expect("Failed to join reader");
             } else {
                 // pairs of FASTQ files
                 for file_pairs in files.chunks_exact(2) {
-                    let reader1 = ThreadReader::new(file_pairs[0].clone(), opts.plain);
-                    let reader2 = ThreadReader::new(file_pairs[1].clone(), opts.plain);
-                    for (reads1, reads2) in izip!(reader1.rx.iter(), reader2.rx.iter()) {
+                    let rx1 = spawn_reader(file_pairs[0].clone(), opts.plain);
+                    let rx2 = spawn_reader(file_pairs[1].clone(), opts.plain);
+                    for (reads1, reads2) in izip!(rx1.iter(), rx2.iter()) {
                         let paired_reads = reads1.into_iter().zip(reads2.into_iter()).collect_vec();
                         process_paired_reads(paired_reads, &matcher, &writer, &progress_logger);
                     }
-                    reader1.handle.join().expect("Failed to join reader");
-                    reader2.handle.join().expect("Failed to join reader");
                 }
             }
         } else {
@@ -341,8 +330,8 @@ fn main() -> Result<()> {
                 files.push(PathBuf::from_str("-").unwrap());
             }
             for file in files {
-                let reader = ThreadReader::new(file.clone(), opts.plain);
-                for reads in reader.rx.iter() {
+                let rx = spawn_reader(file.clone(), opts.plain);
+                for reads in rx.iter() {
                     // Get the matched reads
                     let matched_reads: Vec<OwnedRecord> = reads
                         .into_par_iter()
@@ -362,13 +351,9 @@ fn main() -> Result<()> {
                     let _lock = writer.lock.lock();
                     writer.tx.send(matched_reads).expect("Failed to send read");
                 }
-
-                reader.handle.join().expect("Failed to join reader");
             }
         }
     });
-
-    while !writer.tx.is_empty() {}
 
     Ok(())
 }
