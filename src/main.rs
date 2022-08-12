@@ -202,11 +202,9 @@ arg_enum! {
 /// input and any unrecongized inputs as plaintext (uncompressed).
 ///
 /// EXIT STATUS
-///      The fqgrep utility exits with one of the following values:
 ///
-///      0     One or more lines were selected.
-///      1     No lines were selected.
-///      >1    An error occurred.
+/// The fqgrep utility exits with one of the following values:
+/// 0 if one or more lines were selected, 1 if no lines were selected, and >1 if an error occurred.
 ///
 #[derive(StructOpt, Debug)]
 #[structopt(
@@ -236,7 +234,7 @@ struct Opts {
     #[structopt(long, short = "e")]
     regexp: Vec<String>,
 
-    // Interpret pattern as a set of fixed strings
+    /// Interpret pattern as a set of fixed strings
     #[structopt(long, short = "F")]
     fixed_strings: bool,
 
