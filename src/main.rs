@@ -141,7 +141,7 @@ impl FastqWriter {
     }
 }
 
-fn spawn_reader(file: PathBuf, plain: bool) -> Receiver<Vec<OwnedRecord>> {
+fn spawn_reader(file: PathBuf, decompress: bool) -> Receiver<Vec<OwnedRecord>> {
     let (tx, rx) = bounded(READER_CHANNEL_SIZE);
     rayon::spawn(move || {
         // Open the file or standad input
@@ -157,12 +157,11 @@ fn spawn_reader(file: PathBuf, plain: bool) -> Receiver<Vec<OwnedRecord>> {
         let buf_handle = BufReader::with_capacity(BUFSIZE, raw_handle);
         // Maybe wrap it in a decompressor
         let maybe_decoder_handle = {
-            // plaintext if your **not** a gzip path AND you're either a FASTQ or plain is true
-            let is_plain = !is_gzip_path(&file) && (is_fastq_path(&file) || plain);
-            if is_plain {
-                Box::new(buf_handle) as Box<dyn Read>
-            } else {
+            let is_gzip = is_gzip_path(&file) || (!is_fastq_path(&file) && decompress);
+            if is_gzip {
                 Box::new(MultiGzDecoder::new(buf_handle)) as Box<dyn Read>
+            } else {
+                Box::new(buf_handle) as Box<dyn Read>
             }
         };
         // Open a FASTQ reader, get an iterator over the records, and chunk them
@@ -195,11 +194,11 @@ arg_enum! {
 ///
 /// INPUT COMPRESSION
 ///
-/// By default, the input files must be GZIP compressed. If the input files are real files and end
-/// with `.gz` or `.bgz`, they are assumed to be GZIP compressed.  If they end with `.fastq` or
-/// `.fq`, they are assumed to be plaintext (uncompressed).  All other inputs are assumed to be
-/// GZIP compressed, including standard input.  The `--plain` option may be used to treat standard
-/// input and any unrecongized inputs as plaintext (uncompressed).
+/// By default, the input files are assumed to be uncompressed with the following exceptions: (1)
+/// If the input files are real files and end with `.gz` or `.bgz`, they are assumed to be GZIP
+/// compressed, or (2) if they end with `.fastq` or `.fq`, they are assumed to be uncompressed, or
+/// (3) if the `-Z/--decompress` option is specified then any unrecongized inputs (including
+/// standard input) are assumed to be GZIP compressed.
 ///
 /// EXIT STATUS
 ///
@@ -248,6 +247,10 @@ struct Opts {
     #[structopt(short = "v")]
     invert_match: bool,
 
+    /// Assume all unrecognized inputs are GZIP compressed.
+    #[structopt(short = "Z", long)]
+    decompress: bool,
+
     /// Treat the input files as paired.  The number of input files must be a multiple of two,
     /// with the first file being R1, second R2, third R1, fourth R2, and so on.  If the pattern
     /// matches either R1 or R2, then both R1 and R2 will be output (interleaved).  If the input
@@ -262,10 +265,6 @@ struct Opts {
     /// Write progress information
     #[structopt(long)]
     progress: bool,
-
-    /// The input FASTQ(s) is not compressed
-    #[structopt(long)]
-    plain: bool,
 
     /// The first argument is the pattern to match, with the remaining arguments containing the
     /// files to match.  If `-e` is given, then all the arguments are files to match.
@@ -428,7 +427,7 @@ fn fqgrep() -> Result<usize> {
             if files.len() == 1 {
                 // Interleaved paired end FASTQ
                 // The channel FASTQ record chunks are received after being read in
-                let rx = spawn_reader(files[0].clone(), opts.plain);
+                let rx = spawn_reader(files[0].clone(), opts.decompress);
                 for reads in izip!(rx.iter()) {
                     let paired_reads = reads
                         .into_iter()
@@ -440,8 +439,8 @@ fn fqgrep() -> Result<usize> {
                 // Pairs of FASTQ files
                 for file_pairs in files.chunks_exact(2) {
                     // The channels for R1 and R2 with FASTQ record chunks that are received after being read in
-                    let rx1 = spawn_reader(file_pairs[0].clone(), opts.plain);
-                    let rx2 = spawn_reader(file_pairs[1].clone(), opts.plain);
+                    let rx1 = spawn_reader(file_pairs[0].clone(), opts.decompress);
+                    let rx2 = spawn_reader(file_pairs[1].clone(), opts.decompress);
                     for (reads1, reads2) in izip!(rx1.iter(), rx2.iter()) {
                         let paired_reads = reads1.into_iter().zip(reads2.into_iter()).collect_vec();
                         process_paired_reads(paired_reads, &matcher, &writer, &progress_logger);
@@ -452,7 +451,7 @@ fn fqgrep() -> Result<usize> {
             // Process one FSATQ at a time
             for file in files {
                 // The channel FASTQ record chunks are received after being read in
-                let rx = spawn_reader(file.clone(), opts.plain);
+                let rx = spawn_reader(file.clone(), opts.decompress);
                 for reads in rx.iter() {
                     // Get the matched reads
                     let matched_reads: Vec<OwnedRecord> = reads
