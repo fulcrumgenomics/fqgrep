@@ -1,6 +1,8 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+use fqgrep_lib::color::{color_background, color_head};
+use isatty::stdout_isatty;
 use std::process::ExitCode;
 use std::{
     fs::File,
@@ -8,14 +10,13 @@ use std::{
     path::PathBuf,
     str::FromStr,
 };
+use structopt::clap::arg_enum;
 
 use anyhow::{bail, ensure, Context, Result};
 use env_logger::Env;
 use flate2::bufread::MultiGzDecoder;
 use flume::{bounded, Receiver, Sender};
-use fqgrep_lib::matcher::{
-    FixedStringMatcher, FixedStringSetMatcher, Matcher, MatcherOpts, RegexMatcher, RegexSetMatcher,
-};
+use fqgrep_lib::matcher::{validate_fixed_pattern, Matcher, MatcherFactory, MatcherOpts};
 use fqgrep_lib::{is_fastq_path, is_gzip_path};
 use gzp::BUFSIZE;
 use itertools::{self, izip, Itertools};
@@ -71,7 +72,13 @@ struct FastqWriter {
 }
 
 impl FastqWriter {
-    fn new(count_tx: Sender<usize>, pool: &ThreadPool, count: bool, paired: bool) -> Self {
+    fn new(
+        count_tx: Sender<usize>,
+        pool: &ThreadPool,
+        color_matcher: Option<Box<dyn Matcher + Sync + Send>>,
+        count: bool,
+        paired: bool,
+    ) -> Self {
         // TODO: try making this unbounded
         let (tx, rx): (Sender<Vec<OwnedRecord>>, Receiver<Vec<OwnedRecord>>) =
             bounded(WRITER_CHANNEL_SIZE);
@@ -99,7 +106,24 @@ impl FastqWriter {
                 while let Ok(reads) = rx.recv() {
                     num_matches += reads.len();
                     for read in reads {
-                        fastq::write_to(&mut writer, &read.head, &read.seq, &read.qual)
+                        // Color the reads if desired
+                        let (head, seq, qual) = if let Some(ref matcher) = color_matcher {
+                            let bases_match = matcher.bases_match(&read.seq);
+                            if bases_match {
+                                let (seq, qual) =
+                                    matcher.color_matched_bases(&read.seq, &read.qual);
+                                (color_head(&read.head), seq, qual)
+                            } else {
+                                (
+                                    color_background(&read.head),
+                                    color_background(&read.seq),
+                                    color_background(&read.qual),
+                                )
+                            }
+                        } else {
+                            (read.head, read.seq, read.qual)
+                        };
+                        fastq::write_to(&mut writer, &head, &seq, &qual)
                             .expect("failed writing read");
                     }
                 }
@@ -154,6 +178,15 @@ fn spawn_reader(file: PathBuf, plain: bool) -> Receiver<Vec<OwnedRecord>> {
     rx
 }
 
+arg_enum! {
+    #[derive(PartialEq, Debug)]
+    enum Color {
+    Never,
+    Always,
+    Auto,
+}
+}
+
 /// The fqgrep utility searches any given input FASTQ files, selecting records whose bases match
 /// one or more patterns.   By default, a pattern matches the bases in a FASTQ record if the
 /// regular expression (RE) in the pattern matches the bases.  An empty expression matches every
@@ -188,12 +221,10 @@ struct Opts {
     #[structopt(long, short = "t", default_value = NUM_CPU.as_str())]
     threads: usize,
 
-    /// Treat the input files as paired.  The number of input files must be a multiple of two,
-    /// with the first file being R1, second R2, third R1, fourth R2, and so on.  If the pattern
-    /// matches either R1 or R2, then both R1 and R2 will be output (interleaved).  If the input
-    /// is standard input, then treat the input as interlaved paired end reads.
-    #[structopt(long)]
-    paired: bool,
+    // TODO: support GREP_COLOR(S) (or FQGREP_COLOR(S)) environment variables
+    /// Mark up the matching text.  The possible values of when are “never”, “always” and “auto”.
+    #[structopt(long = "color", default_value = "never")]
+    color: Color,
 
     /// Only a count of selected lines is written to standard output.
     #[structopt(long, short = "c")]
@@ -215,13 +246,20 @@ struct Opts {
     #[structopt(long, short = "f")]
     file: Option<PathBuf>,
 
-    /// Search the reverse complement for matches.
-    #[structopt(long)]
-    reverse_complement: bool,
-
     /// Selected lines are those not matching any of the specified patterns
     #[structopt(short = "v")]
     invert_match: bool,
+
+    /// Treat the input files as paired.  The number of input files must be a multiple of two,
+    /// with the first file being R1, second R2, third R1, fourth R2, and so on.  If the pattern
+    /// matches either R1 or R2, then both R1 and R2 will be output (interleaved).  If the input
+    /// is standard input, then treat the input as interlaved paired end reads.
+    #[structopt(long)]
+    paired: bool,
+
+    /// Search the reverse complement for matches.
+    #[structopt(long)]
+    reverse_complement: bool,
 
     /// Write progress information
     #[structopt(long)]
@@ -314,10 +352,10 @@ fn fqgrep() -> Result<usize> {
 
     if opts.fixed_strings {
         if let Some(pattern) = &pattern {
-            FixedStringMatcher::validate(pattern)?;
+            validate_fixed_pattern(pattern)?;
         } else if !opts.regexp.is_empty() {
             for pattern in &opts.regexp {
-                FixedStringMatcher::validate(pattern)?;
+                validate_fixed_pattern(pattern)?;
             }
         } else {
             bail!("A pattern must be given as a positional argument or with -e/--regexp")
@@ -338,26 +376,35 @@ fn fqgrep() -> Result<usize> {
         None
     };
 
+    let match_opts = MatcherOpts {
+        invert_match: opts.invert_match,
+        reverse_complement: opts.reverse_complement,
+    };
+
+    // The matcher used in the primary search
+    let matcher: Box<dyn Matcher + Sync + Send> =
+        MatcherFactory::new_matcher(&pattern, opts.fixed_strings, &opts.regexp, match_opts);
+
+    //  The matcher used if the output is to be colored, None otherwise
+    let color_matcher = {
+        if opts.color == Color::Always || (opts.color == Color::Auto && stdout_isatty()) {
+            let matcher: Box<dyn Matcher + Sync + Send> =
+                MatcherFactory::new_matcher(&pattern, opts.fixed_strings, &opts.regexp, match_opts);
+            Some(matcher)
+        } else {
+            None
+        }
+    };
+
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(opts.threads)
         .build()
         .unwrap();
 
     let (count_tx, count_rx): (Sender<usize>, Receiver<usize>) = bounded(1);
-    let writer = FastqWriter::new(count_tx, &pool, opts.count, opts.paired);
+    let writer = FastqWriter::new(count_tx, &pool, color_matcher, opts.count, opts.paired);
 
     pool.install(|| {
-        let match_opts = MatcherOpts {
-            invert_match: opts.invert_match,
-            reverse_complement: opts.reverse_complement,
-        };
-        let matcher: Box<dyn Matcher + Sync> = match (opts.fixed_strings, &pattern) {
-            (true, Some(pattern)) => Box::new(FixedStringMatcher::new(pattern, match_opts)),
-            (false, Some(pattern)) => Box::new(RegexMatcher::new(pattern, match_opts)),
-            (true, None) => Box::new(FixedStringSetMatcher::new(&opts.regexp, match_opts)),
-            (false, None) => Box::new(RegexSetMatcher::new(&opts.regexp, match_opts)),
-        };
-
         if opts.paired {
             if files.is_empty() {
                 // read from standad input
@@ -426,7 +473,7 @@ fn fqgrep() -> Result<usize> {
 #[allow(clippy::borrowed_box)] // FIXME: remove me later and solve
 fn process_paired_reads(
     reads: Vec<(OwnedRecord, OwnedRecord)>,
-    matcher: &Box<dyn Matcher + Sync>,
+    matcher: &Box<dyn Matcher + Sync + Send>,
     writer: &FastqWriter,
     progress_logger: &Option<ProgLog>,
 ) {

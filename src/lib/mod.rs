@@ -5,6 +5,7 @@
     clippy::missing_errors_doc,
     clippy::module_name_repetitions
 )]
+pub mod color;
 pub mod matcher;
 use lazy_static::lazy_static;
 use std::{borrow::Borrow, path::Path};

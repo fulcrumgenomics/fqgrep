@@ -1,3 +1,7 @@
+use bitvec::prelude::*;
+use std::ops::Range;
+
+use crate::color::{COLOR_BACKGROUND, COLOR_BASES, COLOR_QUALS};
 use crate::reverse_complement;
 use crate::DNA_BASES;
 use anyhow::{bail, Context, Result};
@@ -11,11 +15,113 @@ pub struct MatcherOpts {
     pub reverse_complement: bool,
 }
 
+fn to_bitvec(ranges: impl Iterator<Item = Range<usize>>, len: usize) -> BitVec {
+    let mut vec = bitvec![0; len];
+    ranges.for_each(|range| {
+        for index in range {
+            vec.set(index, true);
+        }
+    });
+    vec
+}
+
+fn bases_colored(
+    bases: &[u8],
+    quals: &[u8],
+    ranges: impl Iterator<Item = Range<usize>>,
+) -> (Vec<u8>, Vec<u8>) {
+    let mut colored_bases = Vec::with_capacity(bases.len());
+    let mut colored_quals = Vec::with_capacity(bases.len());
+    let bits = to_bitvec(ranges, bases.len());
+    let mut last_color_on = false;
+    let mut last_bases_index = 0;
+    let mut cur_bases_index = 0;
+    for base_color_on in bits.iter() {
+        if *base_color_on {
+            // this base is to be colored
+            if !last_color_on {
+                // add up to but not including this base to the colored vector **as uncolored**
+                if last_bases_index + 1 < cur_bases_index {
+                    COLOR_BACKGROUND
+                        .paint(&bases[last_bases_index..cur_bases_index])
+                        .write_to(&mut colored_bases)
+                        .unwrap();
+                    COLOR_BACKGROUND
+                        .paint(&quals[last_bases_index..cur_bases_index])
+                        .write_to(&mut colored_quals)
+                        .unwrap();
+                }
+                // first base in a run of bases to be colored
+                last_bases_index = cur_bases_index;
+            }
+
+            last_color_on = true;
+        } else {
+            // this base is not to be colored
+            if last_color_on {
+                // add up to but not including this base to the colored vector **as colored**
+                if last_bases_index + 1 < cur_bases_index {
+                    COLOR_BASES
+                        .paint(&bases[last_bases_index..cur_bases_index])
+                        .write_to(&mut colored_bases)
+                        .unwrap();
+                    COLOR_QUALS
+                        .paint(&quals[last_bases_index..cur_bases_index])
+                        .write_to(&mut colored_quals)
+                        .unwrap();
+                }
+                // first base in a run of bases to be colored
+                last_bases_index = cur_bases_index;
+            }
+            last_color_on = false;
+        }
+        cur_bases_index += 1;
+    }
+    // add up to but not including this base to the colored vector **as uncolored**
+    if last_bases_index + 1 < cur_bases_index {
+        if last_color_on {
+            COLOR_BASES
+                .paint(&bases[last_bases_index..cur_bases_index])
+                .write_to(&mut colored_bases)
+                .unwrap();
+            COLOR_QUALS
+                .paint(&quals[last_bases_index..cur_bases_index])
+                .write_to(&mut colored_quals)
+                .unwrap();
+        } else {
+            COLOR_BACKGROUND
+                .paint(&bases[last_bases_index..cur_bases_index])
+                .write_to(&mut colored_bases)
+                .unwrap();
+            COLOR_BACKGROUND
+                .paint(&quals[last_bases_index..cur_bases_index])
+                .write_to(&mut colored_quals)
+                .unwrap();
+        }
+    }
+
+    (colored_bases, colored_quals)
+}
+
+pub fn validate_fixed_pattern(pattern: &str) -> Result<()> {
+    for (index, base) in pattern.chars().enumerate() {
+        if !DNA_BASES.contains(&(base as u8)) {
+            bail!(
+                "Fixed pattern must contain only DNA bases: {} .. [{}] .. {}",
+                &pattern[0..index],
+                &pattern[index..=index],
+                &pattern[index + 1..],
+            )
+        }
+    }
+    Ok(())
+}
+
 pub trait Matcher {
     fn opts(&self) -> MatcherOpts;
 
     fn bases_match(&self, bases: &[u8]) -> bool;
-
+    fn color_matched_bases(&self, bases: &[u8], quals: &[u8]) -> (Vec<u8>, Vec<u8>);
     fn read_match(&self, read: &OwnedRecord) -> bool {
         if self.opts().invert_match {
             self.bases_match(read.seq())
@@ -38,6 +144,15 @@ impl Matcher for FixedStringMatcher {
     fn bases_match(&self, bases: &[u8]) -> bool {
         bases.find(&self.pattern).is_some() != self.opts.invert_match
     }
+
+    fn color_matched_bases(&self, bases: &[u8], quals: &[u8]) -> (Vec<u8>, Vec<u8>) {
+        let ranges = bases.find_iter(&self.pattern).map(|start| Range {
+            start,
+            end: start + self.pattern.len(),
+        });
+        bases_colored(bases, quals, ranges)
+    }
+
     fn opts(&self) -> MatcherOpts {
         self.opts
     }
@@ -47,20 +162,6 @@ impl FixedStringMatcher {
     pub fn new(pattern: &str, opts: MatcherOpts) -> Self {
         let pattern = pattern.as_bytes().to_vec();
         Self { pattern, opts }
-    }
-
-    pub fn validate(pattern: &str) -> Result<()> {
-        for (index, base) in pattern.chars().enumerate() {
-            if !DNA_BASES.contains(&(base as u8)) {
-                bail!(
-                    "Fixed pattern must contain only DNA bases: {} .. [{}] .. {}",
-                    &pattern[0..index],
-                    &pattern[index..=index],
-                    &pattern[index + 1..],
-                )
-            }
-        }
-        Ok(())
     }
 }
 
@@ -76,6 +177,20 @@ impl Matcher for FixedStringSetMatcher {
             .any(|pattern| bases.find(&pattern).is_some())
             != self.opts.invert_match
     }
+
+    fn color_matched_bases(&self, bases: &[u8], quals: &[u8]) -> (Vec<u8>, Vec<u8>) {
+        let ranges = self.patterns.iter().flat_map(|pattern| {
+            bases
+                .find_iter(&pattern)
+                .map(|start| Range {
+                    start,
+                    end: start + pattern.len(),
+                })
+                .collect::<Vec<_>>()
+        });
+        bases_colored(bases, quals, ranges)
+    }
+
     fn opts(&self) -> MatcherOpts {
         self.opts
     }
@@ -114,13 +229,20 @@ impl Matcher for RegexMatcher {
     fn bases_match(&self, bases: &[u8]) -> bool {
         self.regex.is_match(bases) != self.opts.invert_match
     }
+
+    fn color_matched_bases(&self, bases: &[u8], quals: &[u8]) -> (Vec<u8>, Vec<u8>) {
+        let ranges = self.regex.find_iter(bases).map(|m| m.range());
+        bases_colored(bases, quals, ranges)
+    }
+
     fn opts(&self) -> MatcherOpts {
         self.opts
     }
 }
 
 pub struct RegexSetMatcher {
-    regexes: RegexSet,
+    regex_set: RegexSet,
+    regex_matchers: Vec<RegexMatcher>,
     opts: MatcherOpts,
 }
 
@@ -130,16 +252,58 @@ impl RegexSetMatcher {
         S: AsRef<str>,
         I: IntoIterator<Item = S>,
     {
-        let regexes = RegexSetBuilder::new(patterns).build().unwrap();
-        Self { regexes, opts }
+        let string_patterns: Vec<String> = patterns
+            .into_iter()
+            .map(|p| p.as_ref().to_string())
+            .collect();
+        let regex_set = RegexSetBuilder::new(string_patterns.clone())
+            .build()
+            .unwrap();
+        let regex_matchers: Vec<RegexMatcher> = string_patterns
+            .into_iter()
+            .map(|pattern| RegexMatcher::new(pattern.as_ref(), opts))
+            .collect();
+        Self {
+            regex_set,
+            regex_matchers,
+            opts,
+        }
     }
 }
 
 impl Matcher for RegexSetMatcher {
     fn bases_match(&self, bases: &[u8]) -> bool {
-        self.regexes.is_match(bases) != self.opts.invert_match
+        self.regex_set.is_match(bases) != self.opts.invert_match
     }
+
+    fn color_matched_bases(&self, bases: &[u8], quals: &[u8]) -> (Vec<u8>, Vec<u8>) {
+        let ranges = self
+            .regex_matchers
+            .iter()
+            .flat_map(|r| r.regex.find_iter(bases).map(|m| m.range()));
+
+        bases_colored(bases, quals, ranges)
+    }
+
     fn opts(&self) -> MatcherOpts {
         self.opts
+    }
+}
+
+pub struct MatcherFactory;
+
+impl MatcherFactory {
+    pub fn new_matcher(
+        pattern: &Option<String>,
+        fixed_strings: bool,
+        regexp: &Vec<String>,
+        match_opts: MatcherOpts,
+    ) -> Box<dyn Matcher + Sync + Send> {
+        match (fixed_strings, &pattern) {
+            (true, Some(pattern)) => Box::new(FixedStringMatcher::new(pattern, match_opts)),
+            (false, Some(pattern)) => Box::new(RegexMatcher::new(pattern, match_opts)),
+            (true, None) => Box::new(FixedStringSetMatcher::new(regexp, match_opts)),
+            (false, None) => Box::new(RegexSetMatcher::new(regexp, match_opts)),
+        }
     }
 }
