@@ -9,12 +9,17 @@ use bstr::ByteSlice;
 use regex::bytes::{Regex, RegexBuilder, RegexSet, RegexSetBuilder};
 use seq_io::fastq::{OwnedRecord, Record};
 
+/// Common options for pattern matchers
 #[derive(Copy, Clone, Debug)]
 pub struct MatcherOpts {
+    /// Invert the matching. The bases are said to match if they do not contain the pattern
     pub invert_match: bool,
+    /// Include the reverse complement of the bases.  The bases are said to match if they or their
+    /// reverse complement contains the pattern.
     pub reverse_complement: bool,
 }
 
+/// Builds a bit vector from an iterator of ranges.  The ranges may overlap each other.
 fn to_bitvec(ranges: impl Iterator<Item = Range<usize>>, len: usize) -> BitVec {
     let mut vec = bitvec![0; len];
     ranges.for_each(|range| {
@@ -25,14 +30,22 @@ fn to_bitvec(ranges: impl Iterator<Item = Range<usize>>, len: usize) -> BitVec {
     vec
 }
 
+/// Color the bases and qualities based on ranges specifying where a pattern matched bases.  The
+/// ranges may overlap each other.
 fn bases_colored(
     bases: &[u8],
     quals: &[u8],
     ranges: impl Iterator<Item = Range<usize>>,
 ) -> (Vec<u8>, Vec<u8>) {
+    // The resulting colored bases
     let mut colored_bases = Vec::with_capacity(bases.len());
     let mut colored_quals = Vec::with_capacity(bases.len());
+
+    // Merge the ranges into a bit mask, with 1 indicating that base is part of a pattern match
     let bits = to_bitvec(ranges, bases.len());
+
+    // Iterate over the bit mask, finding stretches of matching and non-matching bases.  Color both
+    // in both the bases and qualities
     let mut last_color_on = false;
     let mut last_bases_index = 0;
     let mut cur_bases_index = 0;
@@ -77,7 +90,7 @@ fn bases_colored(
         }
         cur_bases_index += 1;
     }
-    // add up to but not including this base to the colored vector **as uncolored**
+    // Color to the end
     if last_bases_index + 1 < cur_bases_index {
         if last_color_on {
             COLOR_BASES
@@ -103,6 +116,7 @@ fn bases_colored(
     (colored_bases, colored_quals)
 }
 
+/// Validates that a given FIXED pattern contains only valid DNA bases (ACGTN)
 pub fn validate_fixed_pattern(pattern: &str) -> Result<()> {
     for (index, base) in pattern.chars().enumerate() {
         if !DNA_BASES.contains(&(base as u8)) {
@@ -117,11 +131,20 @@ pub fn validate_fixed_pattern(pattern: &str) -> Result<()> {
     Ok(())
 }
 
+/// Base trait for all pattern matchers
 pub trait Matcher {
+    /// The options for the pattern matcher
     fn opts(&self) -> MatcherOpts;
 
+    /// Returns true if the bases match the pattern, false otherwise
     fn bases_match(&self, bases: &[u8]) -> bool;
+
+    /// Colors the bases and qualities based on where they match the pattern.  All bases
+    /// that match the patter are colored.  Colored in this case means adding ANSI color
+    /// codes for printing to a terminal.
     fn color_matched_bases(&self, bases: &[u8], quals: &[u8]) -> (Vec<u8>, Vec<u8>);
+
+    /// Returns true if the read's bases match the pattern, false otherwise
     fn read_match(&self, read: &OwnedRecord) -> bool {
         if self.opts().invert_match {
             self.bases_match(read.seq())
@@ -135,6 +158,7 @@ pub trait Matcher {
     }
 }
 
+/// Matcher for a fixed string pattern
 pub struct FixedStringMatcher {
     pattern: Vec<u8>,
     opts: MatcherOpts,
@@ -165,6 +189,7 @@ impl FixedStringMatcher {
     }
 }
 
+/// Matcher for a set of fixed string patterns
 pub struct FixedStringSetMatcher {
     patterns: Vec<Vec<u8>>,
     opts: MatcherOpts,
@@ -210,6 +235,7 @@ impl FixedStringSetMatcher {
     }
 }
 
+/// Matcher for a regular expression pattern
 pub struct RegexMatcher {
     regex: Regex,
     opts: MatcherOpts,
@@ -246,6 +272,7 @@ pub struct RegexSetMatcher {
     opts: MatcherOpts,
 }
 
+/// Matcher for a set of regular expression patterns
 impl RegexSetMatcher {
     pub fn new<I, S>(patterns: I, opts: MatcherOpts) -> Self
     where
@@ -290,6 +317,7 @@ impl Matcher for RegexSetMatcher {
     }
 }
 
+/// Factory for building a matcher
 pub struct MatcherFactory;
 
 impl MatcherFactory {

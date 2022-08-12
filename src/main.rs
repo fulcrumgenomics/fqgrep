@@ -312,14 +312,18 @@ fn main() -> ExitCode {
 fn fqgrep() -> Result<usize> {
     let mut opts = setup();
 
+    // Add patterns from a file if given
     if let Some(file) = &opts.file {
         for pattern in read_patterns(file)? {
             opts.regexp.push(pattern);
         }
     }
 
+    // Inspect the positional arguments to extract a fixed pattern
     let (pattern, mut files): (Option<String>, Vec<PathBuf>) = {
         let (pattern, file_strings): (Option<String>, Vec<String>) = if opts.regexp.is_empty() {
+            // No patterns given by -e, so assume the first positional argument is the pattern and
+            // the rest are files
             ensure!(
                 !opts.args.is_empty(),
                 "Pattern must be given with -e or as the first positional argument "
@@ -327,9 +331,11 @@ fn fqgrep() -> Result<usize> {
             let files = opts.args.iter().skip(1).cloned().collect();
             (Some(opts.args[0].clone()), files)
         } else {
+            // Patterns given by -e, so assume all positional arguments are files
             (None, opts.args.clone())
         };
 
+        // Convert file strings into paths
         let files = file_strings
             .iter()
             .map(|s| {
@@ -341,6 +347,7 @@ fn fqgrep() -> Result<usize> {
         (pattern, files)
     };
 
+    // Ensure that if multiple files are given, its a multiple of two.
     if opts.paired {
         ensure!(
             files.len() <= 1 || files.len() % 2 == 0,
@@ -348,6 +355,7 @@ fn fqgrep() -> Result<usize> {
         );
     }
 
+    // Validate the fixed string pattern, if fixed-strings are specified
     if opts.fixed_strings {
         if let Some(pattern) = &pattern {
             validate_fixed_pattern(pattern)?;
@@ -360,6 +368,7 @@ fn fqgrep() -> Result<usize> {
         }
     }
 
+    // Set up a progress logger if desired
     let progress_logger = if opts.progress {
         Some(
             ProgLogBuilder::new()
@@ -374,6 +383,7 @@ fn fqgrep() -> Result<usize> {
         None
     };
 
+    // Build the common pattern matching options
     let match_opts = MatcherOpts {
         invert_match: opts.invert_match,
         reverse_complement: opts.reverse_complement,
@@ -383,7 +393,7 @@ fn fqgrep() -> Result<usize> {
     let matcher: Box<dyn Matcher + Sync + Send> =
         MatcherFactory::new_matcher(&pattern, opts.fixed_strings, &opts.regexp, match_opts);
 
-    //  The matcher used if the output is to be colored, None otherwise
+    // Some matcher used if the output is to be colored, None otherwise
     let color_matcher = {
         if opts.color == Color::Always || (opts.color == Color::Auto && stdout_isatty()) {
             let matcher: Box<dyn Matcher + Sync + Send> =
@@ -394,22 +404,30 @@ fn fqgrep() -> Result<usize> {
         }
     };
 
+    // The thread pool from which threads are spanwed.
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(opts.threads)
         .build()
         .unwrap();
 
+    // Sender and receiver channels for the final count of matching records
     let (count_tx, count_rx): (Sender<usize>, Receiver<usize>) = bounded(1);
+
+    // The writer of final counts or matching records
     let writer = FastqWriter::new(count_tx, &pool, color_matcher, opts.count, opts.paired);
 
+    // The main loop
     pool.install(|| {
+        // If no files, use "-" to signify standard input.
+        if files.is_empty() {
+            // read from standard input
+            files.push(PathBuf::from_str("-").unwrap());
+        }
         if opts.paired {
-            if files.is_empty() {
-                // read from standad input
-                files.push(PathBuf::from_str("-").unwrap());
-            }
+            // Either an interleaved paired end FASTQ, or pairs of FASTQs
             if files.len() == 1 {
-                // interleaved paired end FASTQ
+                // Interleaved paired end FASTQ
+                // The channel FASTQ record chunks are received after being read in
                 let rx = spawn_reader(files[0].clone(), opts.plain);
                 for reads in izip!(rx.iter()) {
                     let paired_reads = reads
@@ -419,8 +437,9 @@ fn fqgrep() -> Result<usize> {
                     process_paired_reads(paired_reads, &matcher, &writer, &progress_logger);
                 }
             } else {
-                // pairs of FASTQ files
+                // Pairs of FASTQ files
                 for file_pairs in files.chunks_exact(2) {
+                    // The channels for R1 and R2 with FASTQ record chunks that are received after being read in
                     let rx1 = spawn_reader(file_pairs[0].clone(), opts.plain);
                     let rx2 = spawn_reader(file_pairs[1].clone(), opts.plain);
                     for (reads1, reads2) in izip!(rx1.iter(), rx2.iter()) {
@@ -430,11 +449,9 @@ fn fqgrep() -> Result<usize> {
                 }
             }
         } else {
-            if files.is_empty() {
-                // read from standad input
-                files.push(PathBuf::from_str("-").unwrap());
-            }
+            // Process one FSATQ at a time
             for file in files {
+                // The channel FASTQ record chunks are received after being read in
                 let rx = spawn_reader(file.clone(), opts.plain);
                 for reads in rx.iter() {
                     // Get the matched reads
@@ -461,13 +478,14 @@ fn fqgrep() -> Result<usize> {
     });
 
     drop(writer); // so count_tx.send will execute
-
+                  // Get the final count of records matched
     match count_rx.recv() {
         Ok(count) => Ok(count),
         Err(error) => Err(error).with_context(|| "failed receive final match counts"),
     }
 }
 
+/// Process a chunk of paired end records in parallel.
 #[allow(clippy::borrowed_box)] // FIXME: remove me later and solve
 fn process_paired_reads(
     reads: Vec<(OwnedRecord, OwnedRecord)>,
