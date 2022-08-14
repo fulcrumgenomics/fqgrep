@@ -1,6 +1,7 @@
 use bitvec::prelude::*;
 use std::ops::Range;
 
+use crate::color::{color_background, color_head};
 use crate::color::{COLOR_BACKGROUND, COLOR_BASES, COLOR_QUALS};
 use crate::reverse_complement;
 use crate::DNA_BASES;
@@ -17,6 +18,8 @@ pub struct MatcherOpts {
     /// Include the reverse complement of the bases.  The bases are said to match if they or their
     /// reverse complement contains the pattern.
     pub reverse_complement: bool,
+    /// Color the read based on the match
+    pub color: bool,
 }
 
 /// Builds a bit vector from an iterator of ranges.  The ranges may overlap each other.
@@ -145,8 +148,8 @@ pub trait Matcher {
     fn color_matched_bases(&self, bases: &[u8], quals: &[u8]) -> (Vec<u8>, Vec<u8>);
 
     /// Returns true if the read's bases match the pattern, false otherwise
-    fn read_match(&self, read: &OwnedRecord) -> bool {
-        if self.opts().invert_match {
+    fn read_match(&self, read: &mut OwnedRecord) -> bool {
+        let match_found = if self.opts().invert_match {
             self.bases_match(read.seq())
                 && (self.opts().reverse_complement
                     && self.bases_match(&reverse_complement(read.seq())))
@@ -154,7 +157,23 @@ pub trait Matcher {
             self.bases_match(read.seq())
                 || (self.opts().reverse_complement
                     && self.bases_match(&reverse_complement(read.seq())))
+        };
+
+        if self.opts().color {
+            if match_found {
+                let (seq, qual) = self.color_matched_bases(&read.seq, &read.qual);
+                read.head = color_head(&read.head);
+                read.seq = seq;
+                read.qual = qual;
+            } else {
+                // always color, in case the read is paired
+                read.head = color_background(&read.head);
+                read.seq = color_background(&read.seq);
+                read.qual = color_background(&read.qual);
+            }
         }
+
+        match_found
     }
 }
 
@@ -318,6 +337,7 @@ impl Matcher for RegexSetMatcher {
 }
 
 /// Factory for building a matcher
+///
 pub struct MatcherFactory;
 
 impl MatcherFactory {

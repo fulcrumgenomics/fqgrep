@@ -1,7 +1,6 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use fqgrep_lib::color::{color_background, color_head};
 use isatty::stdout_isatty;
 use std::process::ExitCode;
 use std::{
@@ -72,13 +71,7 @@ struct FastqWriter {
 }
 
 impl FastqWriter {
-    fn new(
-        count_tx: Sender<usize>,
-        pool: &ThreadPool,
-        color_matcher: Option<Box<dyn Matcher + Sync + Send>>,
-        count: bool,
-        paired: bool,
-    ) -> Self {
+    fn new(count_tx: Sender<usize>, pool: &ThreadPool, count: bool, paired: bool) -> Self {
         // TODO: try making this unbounded
         let (tx, rx): (Sender<Vec<OwnedRecord>>, Receiver<Vec<OwnedRecord>>) =
             bounded(WRITER_CHANNEL_SIZE);
@@ -106,24 +99,7 @@ impl FastqWriter {
                 while let Ok(reads) = rx.recv() {
                     num_matches += reads.len();
                     for read in reads {
-                        // Color the reads if desired
-                        let (head, seq, qual) = if let Some(ref matcher) = color_matcher {
-                            let bases_match = matcher.bases_match(&read.seq);
-                            if bases_match {
-                                let (seq, qual) =
-                                    matcher.color_matched_bases(&read.seq, &read.qual);
-                                (color_head(&read.head), seq, qual)
-                            } else {
-                                (
-                                    color_background(&read.head),
-                                    color_background(&read.seq),
-                                    color_background(&read.qual),
-                                )
-                            }
-                        } else {
-                            (read.head, read.seq, read.qual)
-                        };
-                        fastq::write_to(&mut writer, &head, &seq, &qual)
+                        fastq::write_to(&mut writer, &read.head, &read.seq, &read.qual)
                             .expect("failed writing read");
                     }
                 }
@@ -386,22 +362,12 @@ fn fqgrep() -> Result<usize> {
     let match_opts = MatcherOpts {
         invert_match: opts.invert_match,
         reverse_complement: opts.reverse_complement,
+        color: opts.color == Color::Always || (opts.color == Color::Auto && stdout_isatty()),
     };
 
     // The matcher used in the primary search
     let matcher: Box<dyn Matcher + Sync + Send> =
         MatcherFactory::new_matcher(&pattern, opts.fixed_strings, &opts.regexp, match_opts);
-
-    // Some matcher used if the output is to be colored, None otherwise
-    let color_matcher = {
-        if opts.color == Color::Always || (opts.color == Color::Auto && stdout_isatty()) {
-            let matcher: Box<dyn Matcher + Sync + Send> =
-                MatcherFactory::new_matcher(&pattern, opts.fixed_strings, &opts.regexp, match_opts);
-            Some(matcher)
-        } else {
-            None
-        }
-    };
 
     // The thread pool from which threads are spanwed.
     let pool = rayon::ThreadPoolBuilder::new()
@@ -413,7 +379,7 @@ fn fqgrep() -> Result<usize> {
     let (count_tx, count_rx): (Sender<usize>, Receiver<usize>) = bounded(1);
 
     // The writer of final counts or matching records
-    let writer = FastqWriter::new(count_tx, &pool, color_matcher, opts.count, opts.paired);
+    let writer = FastqWriter::new(count_tx, &pool, opts.count, opts.paired);
 
     // The main loop
     pool.install(|| {
@@ -456,11 +422,11 @@ fn fqgrep() -> Result<usize> {
                     // Get the matched reads
                     let matched_reads: Vec<OwnedRecord> = reads
                         .into_par_iter()
-                        .map(|read| -> Option<OwnedRecord> {
+                        .map(|mut read| -> Option<OwnedRecord> {
                             if let Some(progress) = &progress_logger {
                                 progress.record();
                             }
-                            if matcher.read_match(&read) {
+                            if matcher.read_match(&mut read) {
                                 Some(read)
                             } else {
                                 None
@@ -494,7 +460,7 @@ fn process_paired_reads(
 ) {
     reads
         .into_par_iter()
-        .map(|(read1, read2)| {
+        .map(|(mut read1, mut read2)| {
             if let Some(progress) = progress_logger {
                 progress.record();
                 progress.record();
@@ -505,7 +471,12 @@ fn process_paired_reads(
                 std::str::from_utf8(read1.head()).unwrap(),
                 std::str::from_utf8(read2.head()).unwrap()
             );
-            if matcher.read_match(&read1) || matcher.read_match(&read2) {
+            // NB: if the output is to be colored, always call read_match on read2, regardless of
+            // whether or not read1 had a match, so that read2 is always colored.  If the output
+            // isn't to be colored, only search for a match in read2 if read1 does not have a match
+            let match1 = matcher.read_match(&mut read1);
+            let match2 = (!matcher.opts().color && match1) || matcher.read_match(&mut read2);
+            if match1 || match2 {
                 Some((read1, read2))
             } else {
                 None
