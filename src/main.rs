@@ -2,6 +2,7 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use isatty::stdout_isatty;
+use log::debug;
 use std::process::ExitCode;
 use std::{
     fs::File,
@@ -96,12 +97,15 @@ impl FastqWriter {
             pool.spawn(move || {
                 let mut num_matches = 0;
                 let mut writer = BufWriter::with_capacity(BUFSIZE, std::io::stdout());
+                debug!("Writer started");
                 while let Ok(reads) = rx.recv() {
+                    debug!("Got some reads to write");
                     num_matches += reads.len();
                     for read in reads {
                         fastq::write_to(&mut writer, &read.head, &read.seq, &read.qual)
                             .expect("failed writing read");
                     }
+                    debug!("Waiting for more reads to write")
                 }
                 if paired {
                     num_matches /= 2;
@@ -119,7 +123,9 @@ impl FastqWriter {
 
 fn spawn_reader(file: PathBuf, decompress: bool) -> Receiver<Vec<OwnedRecord>> {
     let (tx, rx) = bounded(READER_CHANNEL_SIZE);
+    debug!("Trying to create thread to read from {:?}", file);
     rayon::spawn(move || {
+        debug!("Create thread to read from {:?}", file);
         // Open the file or standad input
         let raw_handle = if file.as_os_str() == "-" {
             Box::new(std::io::stdin()) as Box<dyn Read>
@@ -146,6 +152,7 @@ fn spawn_reader(file: PathBuf, decompress: bool) -> Receiver<Vec<OwnedRecord>> {
             .chunks(CHUNKSIZE * num_cpus::get());
         // Iterate over the chunks
         for chunk in &fastq_reader {
+            debug!("Sending a chunk from {:?}", file);
             tx.send(chunk.map(|r| r.expect("Error reading")).collect())
                 .expect("Error sending");
         }
@@ -383,6 +390,7 @@ fn fqgrep() -> Result<usize> {
 
     // The main loop
     pool.install(|| {
+        debug!("in pool");
         // If no files, use "-" to signify standard input.
         if files.is_empty() {
             // read from standard input
@@ -406,8 +414,11 @@ fn fqgrep() -> Result<usize> {
                 for file_pairs in files.chunks_exact(2) {
                     // The channels for R1 and R2 with FASTQ record chunks that are received after being read in
                     let rx1 = spawn_reader(file_pairs[0].clone(), opts.decompress);
+                    debug!("Readers 1 created");
                     let rx2 = spawn_reader(file_pairs[1].clone(), opts.decompress);
+                    debug!("Readers created");
                     for (reads1, reads2) in izip!(rx1.iter(), rx2.iter()) {
+                        debug!("Processing reads");
                         let paired_reads = reads1.into_iter().zip(reads2.into_iter()).collect_vec();
                         process_paired_reads(paired_reads, &matcher, &writer, &progress_logger);
                     }
@@ -465,12 +476,12 @@ fn process_paired_reads(
                 progress.record();
                 progress.record();
             }
-            assert!(
-                read1.head() == read2.head(),
-                "Mismatching read pair!  R1: {} R2: {}",
-                std::str::from_utf8(read1.head()).unwrap(),
-                std::str::from_utf8(read2.head()).unwrap()
-            );
+            // assert!(
+            //     read1.head() == read2.head(),
+            //     "Mismatching read pair!  R1: {} R2: {}",
+            //     std::str::from_utf8(read1.head()).unwrap(),
+            //     std::str::from_utf8(read2.head()).unwrap()
+            // );
             // NB: if the output is to be colored, always call read_match on read2, regardless of
             // whether or not read1 had a match, so that read2 is always colored.  If the output
             // isn't to be colored, only search for a match in read2 if read1 does not have a match
@@ -489,8 +500,11 @@ fn process_paired_reads(
             matched_reads
         })
         .for_each(|matched_read| {
+            debug!("Getting lock to send to writer");
             let _lock = writer.lock.lock();
+            debug!("Got lock to send to writer");
             writer.tx.send(matched_read).expect("Failed to send read");
+            debug!("Sent to writer");
         });
 }
 
