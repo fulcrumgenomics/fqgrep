@@ -2,6 +2,7 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use isatty::stdout_isatty;
+use std::io::Stdout;
 use std::process::ExitCode;
 use std::{
     fs::File,
@@ -22,7 +23,7 @@ use itertools::{self, izip, Itertools};
 use lazy_static::lazy_static;
 use parking_lot::Mutex;
 use proglog::{CountFormatterKind, ProgLog, ProgLogBuilder};
-use rayon::{prelude::*, ThreadPool};
+use rayon::prelude::*;
 use seq_io::fastq::{self, OwnedRecord, Record};
 use structopt::{clap::AppSettings, StructOpt};
 
@@ -71,47 +72,46 @@ struct FastqWriter {
 }
 
 impl FastqWriter {
-    fn new(count_tx: Sender<usize>, pool: &ThreadPool, count: bool, paired: bool) -> Self {
+    fn new(count_tx: Sender<usize>, count: bool, paired: bool) -> Self {
         // TODO: try making this unbounded
         let (tx, rx): (Sender<Vec<OwnedRecord>>, Receiver<Vec<OwnedRecord>>) =
             bounded(WRITER_CHANNEL_SIZE);
-        if count {
-            pool.spawn(move || {
-                let mut num_matches = 0;
-                while let Ok(reads) = rx.recv() {
-                    num_matches += reads.len();
+        std::thread::spawn(move || {
+            let mut maybe_writer: Option<BufWriter<Stdout>> = {
+                if count {
+                    None
+                } else {
+                    Some(BufWriter::with_capacity(BUFSIZE, std::io::stdout()))
                 }
-                if paired {
-                    num_matches /= 2;
-                }
+            };
+
+            let mut num_matches = 0;
+            while let Ok(reads) = rx.recv() {
+                num_matches += reads.len();
+                if let Some(ref mut writer) = maybe_writer {
+                    for read in reads {
+                        fastq::write_to(&mut *writer, &read.head, &read.seq, &read.qual)
+                            .expect("failed writing read");
+                    }
+                };
+            }
+            if paired {
+                num_matches /= 2;
+            }
+
+            if count {
                 std::io::stdout()
                     .write_all(format!("{}\n", num_matches).as_bytes())
                     .unwrap();
+            }
 
-                count_tx
-                    .send(num_matches)
-                    .expect("failed sending final count");
-            });
-        } else {
-            pool.spawn(move || {
-                let mut num_matches = 0;
-                let mut writer = BufWriter::with_capacity(BUFSIZE, std::io::stdout());
-                while let Ok(reads) = rx.recv() {
-                    num_matches += reads.len();
-                    for read in reads {
-                        fastq::write_to(&mut writer, &read.head, &read.seq, &read.qual)
-                            .expect("failed writing read");
-                    }
-                }
-                if paired {
-                    num_matches /= 2;
-                }
+            if let Some(mut writer) = maybe_writer {
                 writer.flush().expect("Error flushing writer");
-                count_tx
-                    .send(num_matches)
-                    .expect("failed sending final count");
-            });
-        }
+            };
+            count_tx
+                .send(num_matches)
+                .expect("failed sending final count");
+        });
         let lock = Mutex::new(());
         Self { tx, lock }
     }
@@ -119,7 +119,7 @@ impl FastqWriter {
 
 fn spawn_reader(file: PathBuf, decompress: bool) -> Receiver<Vec<OwnedRecord>> {
     let (tx, rx) = bounded(READER_CHANNEL_SIZE);
-    rayon::spawn(move || {
+    std::thread::spawn(move || {
         // Open the file or standad input
         let raw_handle = if file.as_os_str() == "-" {
             Box::new(std::io::stdin()) as Box<dyn Read>
@@ -163,7 +163,7 @@ arg_enum! {
 }
 
 /// The fqgrep utility searches any given input FASTQ files, selecting records whose bases match
-/// one or more patterns.   By default, a pattern matches the bases in a FASTQ record if the
+/// one or more patterns.  By default, a pattern matches the bases in a FASTQ record if the
 /// regular expression (RE) in the pattern matches the bases.  An empty expression matches every
 /// line.  Each FASTQ record that matches at least one of the patterns is written to the standard
 /// output.
@@ -175,6 +175,14 @@ arg_enum! {
 /// compressed, or (2) if they end with `.fastq` or `.fq`, they are assumed to be uncompressed, or
 /// (3) if the `-Z/--decompress` option is specified then any unrecongized inputs (including
 /// standard input) are assumed to be GZIP compressed.
+///
+/// THREADS
+///
+/// The `--threads` option controls the number of threads used to _search_ the reads.
+/// Independently, for single end reads or interleaved paired end reads, a single thread will be
+/// used to read each input FASTQ.  For paired end reads across pairs of FASTQs, two threads will
+/// be used to read the FASTQs for each end of a pair.  Finally, a single thread will be created
+/// for the writer.
 ///
 /// EXIT STATUS
 ///
@@ -190,7 +198,8 @@ arg_enum! {
  ]
 #[allow(clippy::struct_excessive_bools)]
 struct Opts {
-    /// The number of threads to use for matching reads against pattern
+    /// The number of threads to use for matching reads against pattern.  See the full usage for
+    /// threads specific to reading and writing.
     #[structopt(long, short = "t", default_value = NUM_CPU.as_str())]
     threads: usize,
 
@@ -379,7 +388,7 @@ fn fqgrep() -> Result<usize> {
     let (count_tx, count_rx): (Sender<usize>, Receiver<usize>) = bounded(1);
 
     // The writer of final counts or matching records
-    let writer = FastqWriter::new(count_tx, &pool, opts.count, opts.paired);
+    let writer = FastqWriter::new(count_tx, opts.count, opts.paired);
 
     // The main loop
     pool.install(|| {
@@ -414,7 +423,7 @@ fn fqgrep() -> Result<usize> {
                 }
             }
         } else {
-            // Process one FSATQ at a time
+            // Process one FASTQ at a time
             for file in files {
                 // The channel FASTQ record chunks are received after being read in
                 let rx = spawn_reader(file.clone(), opts.decompress);
