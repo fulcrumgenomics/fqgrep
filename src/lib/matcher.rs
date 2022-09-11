@@ -151,8 +151,8 @@ pub trait Matcher {
     fn read_match(&self, read: &mut OwnedRecord) -> bool {
         let match_found = if self.opts().invert_match {
             self.bases_match(read.seq())
-                && (self.opts().reverse_complement
-                    && self.bases_match(&reverse_complement(read.seq())))
+                && (!self.opts().reverse_complement
+                    || self.bases_match(&reverse_complement(read.seq())))
         } else {
             self.bases_match(read.seq())
                 || (self.opts().reverse_complement
