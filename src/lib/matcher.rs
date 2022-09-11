@@ -143,7 +143,7 @@ pub trait Matcher {
     fn bases_match(&self, bases: &[u8]) -> bool;
 
     /// Colors the bases and qualities based on where they match the pattern.  All bases
-    /// that match the patter are colored.  Colored in this case means adding ANSI color
+    /// that match the pattern are colored.  Colored in this case means adding ANSI color
     /// codes for printing to a terminal.
     fn color_matched_bases(&self, bases: &[u8], quals: &[u8]) -> (Vec<u8>, Vec<u8>);
 
@@ -193,7 +193,19 @@ impl Matcher for FixedStringMatcher {
             start,
             end: start + self.pattern.len(),
         });
-        bases_colored(bases, quals, ranges)
+        if self.opts().reverse_complement {
+            let bases_revcomp = &reverse_complement(bases);
+            let ranges_revcomp = bases_revcomp
+                .find_iter(&self.pattern)
+                .map(|start| bases.len() - start - self.pattern.len())
+                .map(|start| Range {
+                    start,
+                    end: start + self.pattern.len(),
+                });
+            bases_colored(bases, quals, ranges.chain(ranges_revcomp))
+        } else {
+            bases_colored(bases, quals, ranges)
+        }
     }
 
     fn opts(&self) -> MatcherOpts {
@@ -232,7 +244,22 @@ impl Matcher for FixedStringSetMatcher {
                 })
                 .collect::<Vec<_>>()
         });
-        bases_colored(bases, quals, ranges)
+        if self.opts().reverse_complement {
+            let bases_revcomp = &reverse_complement(bases);
+            let ranges_revcomp = self.patterns.iter().flat_map(|pattern| {
+                bases_revcomp
+                    .find_iter(&pattern)
+                    .map(|start| bases.len() - start - pattern.len())
+                    .map(|start| Range {
+                        start,
+                        end: start + pattern.len(),
+                    })
+                    .collect::<Vec<_>>()
+            });
+            bases_colored(bases, quals, ranges.chain(ranges_revcomp))
+        } else {
+            bases_colored(bases, quals, ranges)
+        }
     }
 
     fn opts(&self) -> MatcherOpts {
@@ -277,7 +304,20 @@ impl Matcher for RegexMatcher {
 
     fn color_matched_bases(&self, bases: &[u8], quals: &[u8]) -> (Vec<u8>, Vec<u8>) {
         let ranges = self.regex.find_iter(bases).map(|m| m.range());
-        bases_colored(bases, quals, ranges)
+        if self.opts().reverse_complement {
+            let bases_revcomp = &reverse_complement(bases);
+            let ranges_revcomp =
+                self.regex
+                    .find_iter(bases_revcomp)
+                    .map(|m| m.range())
+                    .map(|range| Range {
+                        start: bases.len() - range.start - range.len(),
+                        end: bases.len() - range.start,
+                    });
+            bases_colored(bases, quals, ranges.chain(ranges_revcomp))
+        } else {
+            bases_colored(bases, quals, ranges)
+        }
     }
 
     fn opts(&self) -> MatcherOpts {
@@ -327,8 +367,21 @@ impl Matcher for RegexSetMatcher {
             .regex_matchers
             .iter()
             .flat_map(|r| r.regex.find_iter(bases).map(|m| m.range()));
-
-        bases_colored(bases, quals, ranges)
+        if self.opts().reverse_complement {
+            let bases_revcomp = &reverse_complement(bases);
+            let ranges_revcomp = self.regex_matchers.iter().flat_map(|r| {
+                r.regex
+                    .find_iter(bases_revcomp)
+                    .map(|m| m.range())
+                    .map(|range| Range {
+                        start: bases.len() - range.start - range.len(),
+                        end: bases.len() - range.start,
+                    })
+            });
+            bases_colored(bases, quals, ranges.chain(ranges_revcomp))
+        } else {
+            bases_colored(bases, quals, ranges)
+        }
     }
 
     fn opts(&self) -> MatcherOpts {
