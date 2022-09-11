@@ -1,17 +1,13 @@
 use ansi_term::Color;
 
-use lazy_static::lazy_static;
-
-lazy_static! {
-    /// Color for matching bases in a FASTQ
-    pub static ref COLOR_BASES: Color = Color::Red;
-    /// Color for matching base qualities in a FASTQ
-    pub static ref COLOR_QUALS: Color = Color::Fixed(22);
-    /// Color for a matching read name (head) of a FASTQ
-    pub static ref COLOR_HEAD: Color = Color::Fixed(30);
-    /// Color for all non-matching text in a FASTQ
-    pub static ref COLOR_BACKGROUND: Color = Color::Fixed(240);
-}
+/// Color for matching bases in a FASTQ
+pub const COLOR_BASES: Color = Color::Red;
+/// Color for matching base qualities in a FASTQ
+pub const COLOR_QUALS: Color = Color::Fixed(22);
+/// Color for a matching read name (head) of a FASTQ
+pub const COLOR_HEAD: Color = Color::Fixed(30);
+/// Color for all non-matching text in a FASTQ
+pub const COLOR_BACKGROUND: Color = Color::Fixed(240);
 
 /// Colors the text with the given color
 pub fn color(text: &[u8], colour: &Color) -> Vec<u8> {

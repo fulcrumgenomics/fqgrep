@@ -337,7 +337,6 @@ impl Matcher for RegexSetMatcher {
 }
 
 /// Factory for building a matcher
-///
 pub struct MatcherFactory;
 
 impl MatcherFactory {

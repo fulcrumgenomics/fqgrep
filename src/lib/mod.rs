@@ -10,31 +10,11 @@ pub mod matcher;
 use lazy_static::lazy_static;
 use std::{borrow::Borrow, path::Path};
 
+pub const DNA_BASES: [u8; 5] = *b"ACGTN";
+pub const IUPAC_BASES: [u8; 15] = *b"AGCTYRWSKMDVHBN";
+pub const IUPAC_BASES_COMPLEMENT: [u8; 15] = *b"TCGARYWSMKHBDVN";
+
 lazy_static! {
-    pub static ref DNA_BASES: [u8; 5] = {
-        let mut bases = [0; 5];
-        for (i, base) in b"ACGTN".iter().enumerate() {
-            bases[i] = *base;
-        }
-        bases
-    };
-
-    pub static ref IUPAC_BASES: [u8;15] = {
-        let mut bases = [0; 15];
-        for (i, base) in b"AGCTYRWSKMDVHBN".iter().enumerate() {
-            bases[i] = *base;
-        }
-        bases
-    };
-
-    pub static ref IUPAC_BASES_COMPLEMENT: [u8;15] = {
-        let mut bases = [0; 15];
-        for (i, base) in b"TCGARYWSMKHBDVN".iter().enumerate() {
-            bases[i] = *base;
-        }
-        bases
-    };
-
     pub static ref COMPLEMENT: [u8; 256] = {
         let mut comp = [0; 256];
         for (v, a) in comp.iter_mut().enumerate() {
