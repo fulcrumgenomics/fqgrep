@@ -256,6 +256,7 @@ struct Opts {
     /// Use standard input if either no files are given or `-` is given.
     ///
     /// Input files must be gzip compressed unless `--plain` is given
+    // SW - there is nothing enforcing gzip format
     args: Vec<String>,
 }
 
@@ -292,9 +293,15 @@ fn main() -> ExitCode {
     }
 }
 
-#[allow(clippy::too_many_lines)]
 fn fqgrep() -> Result<usize> {
+    // define instance of opts from setup() -- relies on env var
     let mut opts = setup();
+    fqgrep_from_opts(&mut opts)
+}
+
+#[allow(clippy::too_many_lines)]
+fn fqgrep_from_opts(opts: &mut Opts) -> Result<usize> {
+    //let mut opts = setup();
 
     // Add patterns from a file if given
     if let Some(file) = &opts.file {
@@ -511,4 +518,191 @@ fn setup() -> Opts {
     env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
 
     Opts::from_args()
+}
+
+// Tests
+#[cfg(test)]
+pub mod tests {
+    use crate::*;
+    use fgoxide::io::Io;
+    use tempfile::TempDir;
+
+    /// Returns a path (Vec<String>) to fastq(s) written from sequences provided
+    ///
+    /// # Arguments
+    ///
+    /// * `temp_dir` - A temp directory that must be created in the actual test fucntion
+    /// * `sequences` - A &Vec<Vec<&str>> in which the number of outer Vec indicate the number of fastq files, the inner Vecs indicate the number of records in each fastq
+    ///
+    /// # Examples
+    /// if - sequences = vec![vec!["AAGTCTGAATCCATGGAAAGCTATTG", "GGGTCTGAATCCATGGAAAGCTATTG"], vec!["AAGTCTGAATCCATGGAAAGCTATTG", "GGGTCTGAATCCATGGAAAGCTATTG"]]
+    /// write_fastq() will return Vec</temp/path/to/first.fa, /temp/path/to/second.fq> where 'paths' are Strings.
+    fn write_fastq(temp_dir: &TempDir, sequences: &Vec<Vec<&str>>) -> Vec<String> {
+        // Set io (from fgoxide())
+        let io = Io::default();
+
+        // Initiate a Vec<String>, required type in StructOpts
+        let mut path_vec = Vec::new();
+        //let mut vec_to_write = Vec<Vec::new()>;
+
+        // Initiate loop
+        // First loop through Vec's in &Vec<Vec<&str>> item number becomes part of file name
+        for (i, s) in sequences.iter().enumerate() {
+            let name = format!("sample_{i}.fq");
+            let f1 = temp_dir.path().join(name);
+            let mut lines = Vec::new();
+
+            // Second loop through &str in &Vec<Vec<&str>>
+            for (num, seq) in s.iter().enumerate() {
+                // Seq ID, Sequence, Sep, and Qual
+                lines.push(format!("@{num}"));
+                lines.push(seq.to_string());
+                lines.push("+".to_string());
+                lines.push((String::from("-")).repeat(seq.len()));
+
+                // call io.write_lines()
+                io.write_lines(&f1, &lines).unwrap();
+            }
+            // Convert PathBuf to String - Opts expects Vec<String>
+            // as_string() is not a method of PathBuf
+            let path_as_string = f1.as_path().display().to_string();
+            path_vec.push(path_as_string);
+        }
+        path_vec
+    }
+
+    /// Returns a path (PathBuf) to a file with patterns to read from
+    ///
+    /// # Arguments
+    ///
+    /// * `temp_dir` - A temp directory that must be created in the actual test fucntion
+    /// * `pattern` - Either one pattern or multiple patterns provided as &Vec<String>
+    ///
+    /// # Examples
+    /// if - pattern = &Vec<String::from("^A"), String::from("^G")>
+    /// write_pattern() will return '/temp/path/to/pattern/txt' where pattern.txt has two lines ^A/n^G
+    fn write_pattern(temp_dir: &TempDir, pattern: &Vec<String>) -> PathBuf {
+        // Set io
+        let io = Io::default();
+        // File name and path
+        let name = String::from("pattern.txt");
+        let f1 = temp_dir.path().join(name);
+        // Simply pass pattern to io.write_lines()
+        io.write_lines(&f1, &*pattern).unwrap();
+        // Return
+        f1
+    }
+
+    /// Returns an instance of StructOpts to be passed to fqgrep_from_opts().
+    /// call_opts() calls write_fastq() and optionally calls write_pattern(). If pattern_from_file is true then an opts will be made where opts.regexp is an empty vec and opts.file is a PathBuf;
+    /// else, an opts is created where opts.regexp is a String and opts.file is None
+    ///
+    /// # Arguments
+    ///
+    /// * `temp_dir` - A temp directory that must be created in the actual test fucntion
+    /// * `seqs` - A &Vec<Vec<&str>> in which the number of outer Vec indicate the number of fastq files, the inner Vecs indicate the number of records in each fastq (passed to write_fastq())
+    /// * `regexp` - A &Vec<String> where each String is a pattern to search for
+    /// * `pattern_from_file` - Boolean true = write 'regexp' to file (opts.file) false = write 'regexp' to String
+    ///
+    /// # Examples
+    /// let seqs = vec![vec!["AAGTCTGAATCCATGGAAAGCTATTG", "GGGTCTGAATCCATGGAAAGCTATTG"], vec!["AAGTCTGAATCCATGGAAAGCTATTG", "GGGTCTGAATCCATGGAAAGCTATTG"]];
+    /// let pattern = Vec<String::from("AGTG")>; 
+    /// let dir = = TempDir::new().unwrap();
+    /// let ex_opts = call_opts(dir, seqs, pattern, true)
+    /// ex_opts will be an instance of StructOpts where ex_opts.file is a PathBuf for a file with one line 'AGTG' and ex_opts.args is Vec<String> with two fastq paths 
+    fn call_opts(dir: &TempDir, seqs: &Vec<Vec<&str>>, regexp: &Vec<String>, pattern_from_file: bool) -> Opts {
+        // write fastq
+        let fq_path = write_fastq(&dir, &seqs);
+
+        // define pattern as from file or from string (opts.file or opts.regexp)
+        if pattern_from_file {
+            // Write pattern.txt with user provided patterns
+            let pattern_path: PathBuf = write_pattern(&dir, &regexp);
+            let regex: Vec<String> = vec![];
+            // Write instance of opts
+            let file_test_opts = write_opts(Some(pattern_path), &fq_path, &regex);
+            file_test_opts
+        } else {
+            // Call write_opts
+            let nofile_test_opts = write_opts(None, &fq_path, &regexp);
+            nofile_test_opts
+        }
+    }
+
+    /// Returns an instance of StructOpts within call_opts().
+    /// 
+    /// # Arguments
+    ///
+    /// * `pattern_file_path` - Either None or PathBuf of 'pattern.txt' created in write_pattern()
+    /// * `fastq_file_path` - &Vec<String> created in write_fastq()
+    /// * `regexp_str` - Either an empty Vec<String> or Vec<String> where String = reg expressions
+    ///
+    fn write_opts(
+        pattern_file_path: Option<PathBuf>,
+        fastq_file_path: &Vec<String>,
+        regex_str: &Vec<String>,
+    ) -> Opts {
+        // Takes a PathBuf for Opts.file, &Vec<String> for Opts.args, and &Vec<String> for Opts.regexp
+        let return_opts = Opts {
+            threads: 4,
+            color: Color::Always,
+            count: true,
+            regexp: regex_str.to_vec(),
+            fixed_strings: false,
+            file: pattern_file_path,
+            invert_match: false,
+            decompress: false,
+            paired: false,
+            reverse_complement: false,
+            progress: true,
+            args: fastq_file_path.to_vec(),
+        };
+        return_opts
+    }
+
+    /// Basic test structure 
+    /// Define tempdir, sequences, and pattern. Pass these to call_opts to create instance of StructOpts. PAss instance of StructOpts to fqgrep_from_opts() and assert the number of matches found is what was expected.
+    ///
+    /// # Examples
+    /// A test where the seqs = 'AGTG' and the pattern is '^A' should return one match, whereas pattern = "^G" should return 0 matches. 
+    ///  
+    #[test]
+    fn test_single_fq() {
+        let dir = TempDir::new().unwrap();
+        let seqs = vec![vec![
+            "AAGTCTGAATCCATGGAAAGCTATTG",
+            "GGGTCTGAATCCATGGAAAGCTATTG",
+        ]];
+        let test_pattern = vec![String::from("^A"), String::from("^G")];
+        let mut opts_testcase = call_opts(&dir, &seqs, &test_pattern, false);
+        let result = fqgrep_from_opts(&mut opts_testcase);
+        assert_eq!(result.unwrap(), 2)
+    }
+
+    #[test]
+    fn test_multiple_fq() {
+        let dir = TempDir::new().unwrap();
+        let seqs = vec![
+            vec!["AAGTCTGAATCCATGGAAAGCTATTG", "GGGTCTGAATCCATGGAAAGCTATTG"],
+            vec!["AAGTCTGAATCCATGGAAAGCTATTG", "GGGTCTGAATCCATGGAAAGCTATTG"],
+        ];
+        let test_pattern = vec![String::from("^A"), String::from("^G")];
+        let mut opts_testcase = call_opts(&dir, &seqs, &test_pattern, true);
+        let result = fqgrep_from_opts(&mut opts_testcase);
+        assert_eq!(result.unwrap(), 4)
+    }
+
+    #[test]
+    fn test_paired_reads() {
+        let dir = TempDir::new().unwrap();
+        let seqs = vec![
+            vec![("AAGTCTGAATCCATGGAAAGCTATTG")],
+            vec![("GGGTCTGAATCCATGGAAAGCTATTG")],
+        ];
+        let test_pattern = vec![String::from("^A"), String::from("^G")];
+        let mut opts_testcase = call_opts(&dir, &seqs, &test_pattern, true);
+        opts_testcase.paired = true;
+        let result = fqgrep_from_opts(&mut opts_testcase);
+        assert_eq!(result.unwrap(), 1)
+    }
 }
