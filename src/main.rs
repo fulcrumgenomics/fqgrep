@@ -97,7 +97,6 @@ impl FastqWriter {
             while let Ok(reads) = rx.recv() {
                 num_matches += reads.len();
                 if let Some(ref mut writer) = maybe_writer {
-                    //if let Box<dyn Write> = maybe_writer {
                     for read in reads {
                         fastq::write_to(&mut *writer, &read.head, &read.seq, &read.qual)
                             .expect("failed writing read");
