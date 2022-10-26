@@ -312,7 +312,6 @@ fn fqgrep() -> Result<usize> {
 
 #[allow(clippy::too_many_lines)]
 fn fqgrep_from_opts(opts: &mut Opts) -> Result<usize> {
-    //let mut opts = setup();
 
     // Add patterns from a file if given
     if let Some(file) = &opts.file {
