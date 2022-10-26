@@ -76,7 +76,6 @@ impl FastqWriter {
         let (tx, rx): (Sender<Vec<OwnedRecord>>, Receiver<Vec<OwnedRecord>>) =
             bounded(WRITER_CHANNEL_SIZE);
 
-        // SW change to include file output option
         std::thread::spawn(move || {
             let mut maybe_writer: Option<Box<dyn Write>> = {
                 if count {
