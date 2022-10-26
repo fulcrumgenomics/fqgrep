@@ -2,7 +2,8 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use isatty::stdout_isatty;
-use std::io::Stdout;
+// SW error on unused import
+//use std::io::Stdout;
 use std::process::ExitCode;
 use std::{
     fs::File,
@@ -82,8 +83,7 @@ impl FastqWriter {
             let mut maybe_writer: Option<Box<dyn Write>> = {
                 if count {
                     None
-                } else {
-                    if let Some(file_path) = output {
+                } else if let Some(file_path) = output {
                         Some(Box::new(BufWriter::with_capacity(
                             BUFSIZE,
                             File::create(file_path).unwrap(),
@@ -94,7 +94,6 @@ impl FastqWriter {
                             std::io::stdout(),
                         )))
                     }
-                }
             };
 
             let mut num_matches = 0;
