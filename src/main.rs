@@ -405,7 +405,6 @@ fn fqgrep_from_opts(opts: &mut Opts) -> Result<usize> {
     let (count_tx, count_rx): (Sender<usize>, Receiver<usize>) = bounded(1);
 
     // The writer of final counts or matching records
-    //SW added opts.output
     let writer = FastqWriter::new(count_tx, opts.count, opts.paired, opts.output.clone());
 
     // The main loop
