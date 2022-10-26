@@ -263,8 +263,6 @@ struct Opts {
     /// files to match.  If `-e` is given, then all the arguments are files to match.
     /// Use standard input if either no files are given or `-` is given.
     ///
-    /// Input files must be gzip compressed unless `--plain` is given
-    // SW - there is nothing enforcing gzip format
     args: Vec<String>,
 
     /// Hidden option to capture stdout for testing
