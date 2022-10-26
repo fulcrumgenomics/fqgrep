@@ -2,8 +2,6 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use isatty::stdout_isatty;
-// SW error on unused import
-//use std::io::Stdout;
 use std::process::ExitCode;
 use std::{
     fs::File,
