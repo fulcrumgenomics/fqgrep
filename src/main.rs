@@ -84,16 +84,16 @@ impl FastqWriter {
                 if count {
                     None
                 } else if let Some(file_path) = output {
-                        Some(Box::new(BufWriter::with_capacity(
-                            BUFSIZE,
-                            File::create(file_path).unwrap(),
-                        )))
-                    } else {
-                        Some(Box::new(BufWriter::with_capacity(
-                            BUFSIZE,
-                            std::io::stdout(),
-                        )))
-                    }
+                    Some(Box::new(BufWriter::with_capacity(
+                        BUFSIZE,
+                        File::create(file_path).unwrap(),
+                    )))
+                } else {
+                    Some(Box::new(BufWriter::with_capacity(
+                        BUFSIZE,
+                        std::io::stdout(),
+                    )))
+                }
             };
 
             let mut num_matches = 0;
