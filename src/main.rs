@@ -538,7 +538,7 @@ pub mod tests {
     use fgoxide::io::Io;
     use tempfile::TempDir;
 
-    /// Returns a path (Vec<String>) to fastq(s) written from sequences provided
+    /// Returns the path(s)  of type `Vec<String>` to the fastq(s) written from the provided sequence
     ///
     /// # Arguments
     ///
