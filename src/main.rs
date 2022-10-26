@@ -744,8 +744,8 @@ pub mod tests {
     /// Workflow
     /// Set io as io from fgoxide::io::Io
     /// Define a temp dir and add an output path to the dir
-    /// Clone the output path so it can be read from 
-    /// 
+    /// Clone the output path so it can be read from
+    ///
     /// Define the sequences to search in
     /// Define the pattern to seach for
     /// Call call_opts() and pass resulting StructOpts instance to fqgrep_from_opts()
@@ -764,7 +764,7 @@ pub mod tests {
             vec!["GGGTCTGAATCCATGGAAAGCTATTG"],
         ];
         let test_pattern = vec![String::from("^A")];
-        let mut opts_testcase = call_opts(&dir, &seqs, &test_pattern, true, Some(out.path));
+        let mut opts_testcase = call_opts(&dir, &seqs, &test_pattern, true, Some(out_path));
         // run fqgrep
         let _result = fqgrep_from_opts(&mut opts_testcase);
 
