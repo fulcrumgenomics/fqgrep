@@ -681,14 +681,6 @@ pub mod tests {
     }
 
     /// Tests a single fq file for a seq starting with either A or G to count matches
-    ///
-    /// Workflow
-    /// Define a temp dir
-    /// Define the sequences to search in
-    /// Define the pattern to seach for
-    /// Call call_opts() and pass resulting StructOpts instance to fqgrep_from_opts()
-    /// Assert that fqgrep() returns two matches
-    ///  
     #[test]
     fn test_single_fq() {
         let dir = TempDir::new().unwrap();
