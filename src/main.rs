@@ -729,7 +729,7 @@ pub mod tests {
         assert_eq!(result.unwrap(), 2)
     }
 
-    /// Tests a two fastqs for a seq that starts with A
+    /// Tests two fastqs for a seq that starts with A and check the output
     ///
     /// Workflow
     /// Set io as io from fgoxide::io::Io
