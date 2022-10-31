@@ -610,7 +610,7 @@ pub mod tests {
     ///
     /// * `temp_dir` - A temp directory that must be created in the actual test fucntion
     /// * `seqs` - A &Vec<Vec<&str>> in which the number of outer Vec indicate the number of fastq files, the inner Vecs indicate the number of records in each fastq (passed to write_fastq())
-    /// * `regexp` - A &Vec<String> where each String is a pattern to search for
+    /// * `regexp` - One or more patterns to search for
     /// * `pattern_from_file` - Boolean true = write 'regexp' to file (opts.file) false = write 'regexp' to String
     /// * `output_path` - Either None or PathBuf to 'output.fq'
     ///
