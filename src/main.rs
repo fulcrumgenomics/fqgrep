@@ -555,7 +555,6 @@ pub mod tests {
         // Initialize a Vec<String>
         let mut fastq_paths = Vec::new();
 
-        // Initiate loop
         // First loop through Vec's in &Vec<Vec<&str>> item number becomes part of file name
         for (i, s) in sequences.iter().enumerate() {
             let name = format!("sample_{i}.fq");
