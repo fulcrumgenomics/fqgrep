@@ -548,7 +548,7 @@ pub mod tests {
     /// # Examples
     /// if - sequences = vec![vec!["AAGTCTGAATCCATGGAAAGCTATTG", "GGGTCTGAATCCATGGAAAGCTATTG"], vec!["AAGTCTGAATCCATGGAAAGCTATTG", "GGGTCTGAATCCATGGAAAGCTATTG"]]
     /// write_fastq() will return Vec</temp/path/to/first.fa, /temp/path/to/second.fq> where 'paths' are Strings.
-    fn write_fastq(temp_dir: &TempDir, sequences: &Vec<Vec<&str>>) -> Vec<String> {
+    fn write_fastq(temp_dir: &TempDir, sequences_per_fastq: &Vec<Vec<&str>>) -> Vec<String> {
         // Set io (from fgoxide())
         let io = Io::default();
 
