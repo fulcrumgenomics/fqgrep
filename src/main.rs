@@ -620,7 +620,7 @@ pub mod tests {
     /// let dir = = TempDir::new().unwrap();
     /// let ex_opts = call_opts(dir, seqs, pattern, true)
     /// ex_opts will be an instance of StructOpts where ex_opts.file is a PathBuf for a file with one line 'AGTG' and ex_opts.args is Vec<String> with two fastq paths
-    fn call_opts(
+    fn build_opts(
         dir: &TempDir,
         seqs: &Vec<Vec<&str>>,
         regexp: &Vec<String>,
