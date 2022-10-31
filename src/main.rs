@@ -584,7 +584,7 @@ pub mod tests {
     /// # Arguments
     ///
     /// * `temp_dir` - A temp directory that must be created in the actual test fucntion
-    /// * `pattern` - Either one pattern or multiple patterns provided as &Vec<String>
+    /// * `pattern` - One or more patterns
     ///
     /// # Examples
     /// if - pattern = &Vec<String::from("^A"), String::from("^G")>
