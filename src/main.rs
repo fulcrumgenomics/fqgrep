@@ -552,7 +552,7 @@ pub mod tests {
         // Set io (from fgoxide())
         let io = Io::default();
 
-        // Initiate a Vec<String>, required type in StructOpts
+        // Initialize a Vec<String>
         let mut path_vec = Vec::new();
 
         // Initiate loop
