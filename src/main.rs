@@ -601,9 +601,10 @@ pub mod tests {
         f1
     }
 
-    /// Returns an instance of StructOpts to be passed to fqgrep_from_opts().
-    /// call_opts() calls write_fastq() and optionally calls write_pattern(). If pattern_from_file is true then an opts will be made where opts.regexp is an empty vec and opts.file is a PathBuf;
-    /// else, an opts is created where opts.regexp is a String and opts.file is None
+
+    /// Builds the command line options used for testing.
+    /// Builds an instance of StructOpts to be passed to fqgrep_from_opts().  This will also write the
+    /// FASTQ(s) (via write_fastq) and optionally writes the search pattern to a file (via write_pattern) if pattern_from_file is true.  For the latter, opts.regex and opts.file will set appropriately.
     ///
     /// # Arguments
     ///
