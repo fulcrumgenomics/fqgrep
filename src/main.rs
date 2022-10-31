@@ -740,7 +740,7 @@ pub mod tests {
         let out_path = dir.path().join(String::from("output.fq"));
         // Clone path to read from below
         // TODO: refactor
-        let x = &out_path.clone();
+        let output_path = &out_path.clone();
         let seqs = vec![
             vec!["AAGTCTGAATCCATGGAAAGCTATTG"],
             vec!["GGGTCTGAATCCATGGAAAGCTATTG"],
