@@ -558,7 +558,7 @@ pub mod tests {
         // Iterate through each FASTQ file we are to build
         for (fastq_index, fastq_sequences) in sequences.iter().enumerate() {
             let name = format!("sample_{i}.fq");
-            let f1 = temp_dir.path().join(name);
+            let fastq_path = temp_dir.path().join(name);
             let mut lines = Vec::new();
 
             // Second loop through &str in &Vec<Vec<&str>>
