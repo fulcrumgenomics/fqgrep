@@ -748,7 +748,7 @@ pub mod tests {
         let test_pattern = vec![String::from("^A")];
         let mut opts_testcase = call_opts(&dir, &seqs, &test_pattern, true, Some(out_path));
         // run fqgrep
-        let _result = fqgrep_from_opts(&mut opts_testcase);
+        let fqgrep_output = fqgrep_from_opts(&mut opts_testcase);
 
         // read seqs back from the output path
         let mut lines = io.read_lines(&x).unwrap();
