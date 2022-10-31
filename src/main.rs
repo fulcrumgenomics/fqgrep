@@ -569,7 +569,6 @@ pub mod tests {
                 lines.push("+".to_string());
                 lines.push((String::from("-")).repeat(seq.len()));
 
-                // call io.write_lines()
                 io.write_lines(&f1, &lines).unwrap();
             }
             // Convert PathBuf to String - Opts expects Vec<String>
