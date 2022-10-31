@@ -680,7 +680,7 @@ pub mod tests {
         return_opts
     }
 
-    /// Tests a single fq file for a seq starting with either A or G
+    /// Tests a single fq file for a seq starting with either A or G to count matches
     ///
     /// Workflow
     /// Define a temp dir
