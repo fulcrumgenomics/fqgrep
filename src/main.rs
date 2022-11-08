@@ -273,7 +273,7 @@ struct Opts {
 }
 
 fn read_patterns(file: &PathBuf) -> Result<Vec<String>> {
-    let f = File::open(&file).expect("error in opening file");
+    let f = File::open(file).expect("error in opening file");
     let r = BufReader::new(f);
     let mut v = Vec::new();
     for result in r.lines() {
