@@ -64,7 +64,6 @@ pub mod built_info {
         pub static ref VERSION: String = get_software_version();
     }
 }
-#[derive(Debug)]
 struct FastqWriter {
     tx: Sender<Vec<OwnedRecord>>,
     lock: Mutex<()>,
