@@ -64,6 +64,7 @@ pub mod built_info {
         pub static ref VERSION: String = get_software_version();
     }
 }
+
 struct FastqWriter {
     tx: Sender<Vec<OwnedRecord>>,
     lock: Mutex<()>,
@@ -96,6 +97,7 @@ impl FastqWriter {
             while let Ok(reads) = rx.recv() {
                 num_matches += reads.len();
                 if let Some(ref mut writer) = maybe_writer {
+                    println!("{:?}", &reads);
                     for read in reads {
                         fastq::write_to(&mut *writer, &read.head, &read.seq, &read.qual)
                             .expect("failed writing read");
@@ -304,14 +306,12 @@ fn main() -> ExitCode {
 }
 
 fn fqgrep() -> Result<usize> {
-    // define instance of opts from setup() -- relies on env var
     let mut opts = setup();
     fqgrep_from_opts(&mut opts)
 }
 
 #[allow(clippy::too_many_lines)]
 fn fqgrep_from_opts(opts: &mut Opts) -> Result<usize> {
-
     // Add patterns from a file if given
     if let Some(file) = &opts.file {
         for pattern in read_patterns(file)? {
@@ -535,6 +535,7 @@ fn setup() -> Opts {
 pub mod tests {
     use crate::*;
     use fgoxide::io::Io;
+    use seq_io::fastq::{OwnedRecord, Record};
     use tempfile::TempDir;
 
     /// Returns the path(s)  of type `Vec<String>` to the fastq(s) written from the provided sequence
@@ -548,34 +549,31 @@ pub mod tests {
     /// if - sequences = vec![vec!["AAGTCTGAATCCATGGAAAGCTATTG", "GGGTCTGAATCCATGGAAAGCTATTG"], vec!["AAGTCTGAATCCATGGAAAGCTATTG", "GGGTCTGAATCCATGGAAAGCTATTG"]]
     /// write_fastq() will return Vec</temp/path/to/first.fa, /temp/path/to/second.fq> where 'paths' are Strings.
     fn write_fastq(temp_dir: &TempDir, sequences_per_fastq: &Vec<Vec<&str>>) -> Vec<String> {
-        // Set io (from fgoxide())
-        let io = Io::default();
-
         // Initialize a Vec<String>
         let mut fastq_paths = Vec::new();
 
         // Iterate through each FASTQ file we are to build
-        for (fastq_index, fastq_sequences) in sequences.iter().enumerate() {
-            let name = format!("sample_{i}.fq");
+        for (fastq_index, fastq_sequences) in sequences_per_fastq.iter().enumerate() {
+            let name = format!("sample_{fastq_index}.fq");
             let fastq_path = temp_dir.path().join(name);
-            let mut lines = Vec::new();
+            let mut writer = BufWriter::with_capacity(BUFSIZE, File::create(&fastq_path).unwrap());
 
             // Second loop through &str in &Vec<Vec<&str>>
-            for (num, seq) in s.iter().enumerate() {
-                // Seq ID, Sequence, Sep, and Qual
-                lines.push(format!("@{num}"));
-                lines.push(seq.to_string());
-                lines.push("+".to_string());
-                lines.push((String::from("-")).repeat(seq.len()));
-
-                io.write_lines(&f1, &lines).unwrap();
+            for (num, seq) in fastq_sequences.iter().enumerate() {
+                let read = OwnedRecord {
+                    head: format!("@{num}").as_bytes().to_vec(),
+                    seq: seq.as_bytes().to_vec(),
+                    qual: vec![b'X'; seq.len()],
+                };
+                fastq::write_to(&mut writer, &read.head, &read.seq, &read.qual)
+                    .expect("failed writing read");
             }
             // Convert PathBuf to String - Opts expects Vec<String>
             // as_string() is not a method of PathBuf
-            let path_as_string = f1.as_path().display().to_string();
-            path_vec.push(path_as_string);
+            let path_as_string = fastq_path.as_path().display().to_string();
+            fastq_paths.push(path_as_string);
         }
-        path_vec
+        fastq_paths
     }
 
     /// Returns a path (PathBuf) to a file with patterns to read from
@@ -593,13 +591,12 @@ pub mod tests {
         let io = Io::default();
         // File name and path
         let name = String::from("pattern.txt");
-        let f1 = temp_dir.path().join(name);
+        let pattern_path = temp_dir.path().join(name);
         // Simply pass pattern to io.write_lines()
-        io.write_lines(&f1, &*pattern).unwrap();
+        io.write_lines(&pattern_path, &*pattern).unwrap();
         // Return
-        f1
+        pattern_path
     }
-
 
     /// Builds the command line options used for testing.
     /// Builds an instance of StructOpts to be passed to fqgrep_from_opts().  This will also write the
@@ -626,140 +623,114 @@ pub mod tests {
         pattern_from_file: bool,
         output: Option<PathBuf>,
     ) -> Opts {
-        // write fastq
         let fq_path = write_fastq(&dir, &seqs);
 
-        // define pattern as from file or from string (opts.file or opts.regexp)
-        if pattern_from_file {
-            // Write pattern.txt from provided patterns
-            let pattern_path: PathBuf = write_pattern(&dir, &regexp);
-            let regex: Vec<String> = vec![];
-            // Write instance of opts
-            let file_test_opts = write_opts(Some(pattern_path), &fq_path, &regex, output);
-            file_test_opts
-        } else {
-            // Call write_opts
-            let nofile_test_opts: Opts = write_opts(None, &fq_path, &regexp, output);
-            nofile_test_opts
-        }
-    }
+        let (pattern_string, pattern_file) = {
+            if pattern_from_file {
+                (vec![], Some(write_pattern(&dir, &regexp)))
+            } else {
+                (regexp.to_vec(), None)
+            }
+        };
 
-    /// Returns an instance of StructOpts within call_opts().
-    ///
-    /// # Arguments
-    ///
-    /// * `pattern_file_path` - Either None or PathBuf to 'pattern.txt' created in write_pattern()
-    /// * `fastq_file_path` - &Vec<String> created in write_fastq()
-    /// * `regexp_str` - Either an empty Vec<String> or Vec<String> where String = reg expressions
-    /// * `output_path` - Either None or PathBuf to 'output.fq'
-    ///
-    fn write_opts(
-        pattern_file_path: Option<PathBuf>,
-        fastq_file_path: &Vec<String>,
-        regex_str: &Vec<String>,
-        output_path: Option<PathBuf>,
-    ) -> Opts {
-        // Takes a PathBuf as Opts.file, &Vec<String> for Opts.args, and &Vec<String> for Opts.regexp
         let return_opts = Opts {
-            // todo count must be false when in combination with an output path
             threads: 4,
             color: Color::Never,
-            count: false,
-            regexp: regex_str.to_vec(),
+            count: {
+                if &output == &None {
+                    true
+                } else {
+                    false
+                }
+            },
+            regexp: pattern_string,
             fixed_strings: false,
-            file: pattern_file_path,
+            file: pattern_file,
             invert_match: false,
             decompress: false,
             paired: false,
             reverse_complement: false,
             progress: true,
-            args: fastq_file_path.to_vec(),
-            output: output_path,
+            args: fq_path.to_vec(),
+            output: output,
         };
         return_opts
     }
 
-    /// Tests a single fq file for a seq starting with either A or G to count matches
+    /// Returns sequences from fastq
+    ///
+    /// # Arguments
+    /// * result_path" path to fastq of matches
+    ///
+    /// # Example
+    /// let dir: TempDir = TempDir::new().unwrap();
+    /// let out_path = dir.path().join(String::from("output.fq"));
+    /// let return_seq = slurp_output(out_path);
+    fn slurp_output(result_path: PathBuf) -> Vec<String> {
+        let mut return_seqs = vec![];
+        let mut reader = fastq::Reader::from_path(result_path).unwrap();
+        while let Some(record) = reader.next() {
+            let record = record.expect("Error reading record");
+            // convert bytes to str
+            let seq = std::str::from_utf8(record.seq()).unwrap();
+            return_seqs.push(seq.to_owned());
+        }
+        return_seqs
+    }
+
+    /// Tests a single fq file for a seq starting with either A or G
+    ///
     #[test]
     fn test_single_fq() {
         let dir = TempDir::new().unwrap();
         let seqs = vec![vec![
             "AAGTCTGAATCCATGGAAAGCTATTG",
             "GGGTCTGAATCCATGGAAAGCTATTG",
+            "TGGTCTGAATCCATGGAAAGCTATTG",
         ]];
         let test_pattern = vec![String::from("^A"), String::from("^G")];
-        let mut opts_testcase = call_opts(&dir, &seqs, &test_pattern, false, None);
-        // TODO: Automatically set count as t/f depending on opts.output
-        opts_testcase.count = true;
+        let mut opts_testcase = build_opts(&dir, &seqs, &test_pattern, false, None);
         let result = fqgrep_from_opts(&mut opts_testcase);
         assert_eq!(result.unwrap(), 2)
     }
 
     /// Tests two files (paired reads) for seqs starting with either A or G
     ///
-    /// Workflow
-    /// Define a temp dir
-    /// Define the sequences to search in
-    /// Define the pattern to seach for
-    /// Call call_opts() and pass resulting StructOpts instance to fqgrep_from_opts()
-    /// Set opts.testcase.paired to true
-    /// Assert that fqgrep() returns two matches
-    ///
     #[test]
     fn test_multiple_fq() {
         let dir = TempDir::new().unwrap();
         let seqs = vec![
-            vec!["AAGTCTGAATCCATGGAAAGCTATTG", "GGGTCTGAATCCATGGAAAGCTATTG"],
-            vec!["AAGTCTGAATCCATGGAAAGCTATTG", "GGGTCTGAATCCATGGAAAGCTATTG"],
+            vec!["AAGTCTGAATCCATGGAAAGCTATTG", "TCGTCTGAATCCATGGAAAGCTATTG"],
+            vec!["GGGTCTGAATCCATGGAAAGCTATTG", "CTCTCTGAATCCATGGAAAGCTATTG"],
         ];
-        let test_pattern = vec![String::from("^A"), String::from("^G")];
-        let mut opts_testcase = call_opts(&dir, &seqs, &test_pattern, true, None);
-        opts_testcase.count = true;
+        let test_pattern = vec![String::from("^A")];
+        let mut opts_testcase = build_opts(&dir, &seqs, &test_pattern, true, None);
         opts_testcase.paired = true;
         let result = fqgrep_from_opts(&mut opts_testcase);
-        assert_eq!(result.unwrap(), 2)
+        assert_eq!(result.unwrap(), 1)
     }
 
     /// Tests two fastqs for a seq that starts with A and check the output
     ///
-    /// Workflow
-    /// Set io as io from fgoxide::io::Io
-    /// Define a temp dir and add an output path to the dir
-    /// Clone the output path so it can be read from
-    ///
-    /// Define the sequences to search in
-    /// Define the pattern to seach for
-    /// Call call_opts() and pass resulting StructOpts instance to fqgrep_from_opts()
-    /// Assert that fqgrep() returns two matches
-    ///
     #[test]
     fn test_get_output() {
-        let io = Io::default();
         let dir: TempDir = TempDir::new().unwrap();
         let out_path = dir.path().join(String::from("output.fq"));
-        // Clone path to read from below
         // TODO: refactor
-        let output_path = &out_path.clone();
+        let result_path = &out_path.clone();
         let seqs = vec![
             vec!["AAGTCTGAATCCATGGAAAGCTATTG"],
             vec!["GGGTCTGAATCCATGGAAAGCTATTG"],
+            vec!["GGGGGGGGGGGGTTTTTTTTTTTTTT"],
         ];
-        let test_pattern = vec![String::from("^A")];
-        let mut opts_testcase = call_opts(&dir, &seqs, &test_pattern, true, Some(out_path));
-        // run fqgrep
-        let fqgrep_output = fqgrep_from_opts(&mut opts_testcase);
-
-        // read seqs back from the output path
-        let mut lines = io.read_lines(&x).unwrap();
-        // Get only the seqs (every 4th line skipping the first line)
-        let mut count = -2;
-        lines.retain(|_| {
-            count += 1;
-            return count % 4 == 0;
-        });
-        // make expected
-        let expected = vec!["AAGTCTGAATCCATGGAAAGCTATTG"];
-        // compare
-        assert_eq!(lines, expected);
+        let test_pattern = vec![String::from("AA")];
+        let mut opts_testcase = build_opts(&dir, &seqs, &test_pattern, true, Some(out_path));
+        let _result = fqgrep_from_opts(&mut opts_testcase);
+        let return_sequences = slurp_output(result_path.to_path_buf());
+        let expected_sequences = vec![
+            ("AAGTCTGAATCCATGGAAAGCTATTG"),
+            ("GGGTCTGAATCCATGGAAAGCTATTG"),
+        ];
+        assert_eq!(expected_sequences, return_sequences);
     }
 }
