@@ -230,7 +230,7 @@ impl Matcher for FixedStringSetMatcher {
     fn bases_match(&self, bases: &[u8]) -> bool {
         self.patterns
             .iter()
-            .any(|pattern| bases.find(&pattern).is_some())
+            .any(|pattern| bases.find(pattern).is_some())
             != self.opts.invert_match
     }
 
