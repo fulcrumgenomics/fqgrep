@@ -2,8 +2,6 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use isatty::stdout_isatty;
-//use std::any::Any;
-//use std::error::Error;
 use std::process::ExitCode;
 use std::{
     fs::File,
@@ -580,6 +578,7 @@ pub mod tests {
     ///
     /// * `temp_dir` - A temp directory that must be created in the actual test fucntion
     /// * `sequences` - A &Vec<Vec<&str>> where the outer Vec contains the the reads for a given FASTQ file
+    /// * `file_extension` - The desired file extension i.e. .fq, .fq.gz etc.
     ///
     /// # Examples
     /// if - sequences = vec![vec!["AAGTCTGAATCCATGGAAAGCTATTG", "GGGTCTGAATCCATGGAAAGCTATTG"], vec!["AAGTCTGAATCCATGGAAAGCTATTG", "GGGTCTGAATCCATGGAAAGCTATTG"]]
@@ -598,7 +597,6 @@ pub mod tests {
             let fastq_path = temp_dir.path().join(name);
             let io = Io::default();
             let mut writer = io.new_writer(&fastq_path).unwrap();
-            // let mut writer = BufWriter::with_capacity(BUFSIZE, File::create(&fastq_path).unwrap());
 
             // Second loop through &str in &Vec<Vec<&str>>
             for (num, seq) in fastq_sequences.iter().enumerate() {
@@ -612,7 +610,6 @@ pub mod tests {
             }
             // Convert PathBuf to String - Opts expects Vec<String>
             // as_string() is not a method of PathBuf
-            //fastq_path.set_extension("fq.gz");
             let path_as_string = fastq_path.as_path().display().to_string();
             fastq_paths.push(path_as_string);
         }
@@ -994,13 +991,10 @@ pub mod tests {
     // ################################## Scratch/Dev #############################################
 
     // ############################################################################################
-    // Tests two fastqs for 'TGGATTCAGACTT' which is only found once in the reverse complement.
-    // Number of matches /2 compared to unpaired test above
-    // ############################################################################################
-    // ############################################################################################
     // Tests that main returns expected exit code (excluding Exit Code 101 panic)
     // ############################################################################################
     #[test]
+    #[ignore]
     fn test_exit_code() {
         let dir = TempDir::new().unwrap();
         let seqs = vec![
@@ -1031,70 +1025,6 @@ pub mod tests {
         //let mut opts_testcase_fail = build_opts(&dir, &seqs, &test_pattern, true, None);
         //let exit_code_fail = test_main(&mut opts_testcase_fail);
         //assert_eq!(2, exit_code_fail);
-    }
-
-    #[test]
-    #[ignore] // merged assertions into test_reverse_complement_invert
-    fn test_reverse_complement_paired() {
-        let dir = TempDir::new().unwrap();
-        let seqs = vec![
-            vec!["GTCAGCTCGAGCATCAGCTACGCACT", "GGGTCTGAATCCATGGAAAGCTATTG"],
-            vec!["AGTGCGTAGCTGATGCTCGAGCTGAC", "AAGTCTGAATCCATGGAAAGCTATTG"],
-        ];
-
-        let test_pattern = vec![String::from("TGGATTCAGACTT")];
-
-        let mut opts_testcase_reverse =
-            build_opts(&dir, &seqs, &test_pattern, true, None, String::from(".fq"));
-        let mut opts_testcase_invert =
-            build_opts(&dir, &seqs, &test_pattern, true, None, String::from(".fq"));
-
-        opts_testcase_reverse.reverse_complement = true;
-        opts_testcase_invert.invert_match = true;
-
-        opts_testcase_reverse.paired = true;
-        opts_testcase_invert.paired = true;
-
-        let result_reverse = fqgrep_from_opts(&mut opts_testcase_reverse);
-        let result_invert = fqgrep_from_opts(&mut opts_testcase_invert);
-
-        assert_eq!(result_reverse.unwrap(), 1);
-        assert_eq!(result_invert.unwrap(), 2)
-    }
-
-    // ############################################################################################
-    // Tests for compatibility with .gz and .bgz
-    // ############################################################################################
-    #[test]
-    #[ignore]
-    fn test_file_compression() {
-        let dir = TempDir::new().unwrap();
-        let seqs = vec![vec![
-            "GTCAGCTCGAGCATCAGCTACGCACT",
-            "AGTGCGTAGCTGATGCTCGAGCTGAC",
-        ]];
-
-        // Normal
-        let test_pattern = vec![String::from("^G")]; // should match one record
-        let mut opts_testcase =
-            build_opts(&dir, &seqs, &test_pattern, true, None, String::from(".fq"));
-        let result = fqgrep_from_opts(&mut opts_testcase); // works to assert expect Error opening input
-        assert_eq!(result.unwrap(), 1);
-
-        // GZIP
-        let mut copy = opts_testcase.args.clone();
-        let mut path = PathBuf::from(copy.swap_remove(0));
-        let mut fastq_path_gz = dir.path().join("sample.fz.gz");
-        fs::copy(path, &fastq_path_gz);
-        assert!(&fastq_path_gz.exists());
-
-        let path_as_string = fastq_path_gz.as_path().display().to_string();
-        opts_testcase.args = vec![path_as_string];
-
-        // TODO throws error 'invalid gzip header'
-        let result_gz = fqgrep_from_opts(&mut opts_testcase);
-
-        //assert_eq!(result_gz.unwrap(), 1);
     }
 
     /// Test that when expect statements are violated errors are returned
