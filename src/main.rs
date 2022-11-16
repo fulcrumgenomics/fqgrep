@@ -1,7 +1,20 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+use anyhow::{bail, ensure, Context, Result};
+use env_logger::Env;
+use flate2::bufread::MultiGzDecoder;
+use flume::{bounded, Receiver, Sender};
+use fqgrep_lib::matcher::{validate_fixed_pattern, Matcher, MatcherFactory, MatcherOpts};
+use fqgrep_lib::{is_fastq_path, is_gzip_path};
+use gzp::BUFSIZE;
 use isatty::stdout_isatty;
+use itertools::{self, izip, Itertools};
+use lazy_static::lazy_static;
+use parking_lot::Mutex;
+use proglog::{CountFormatterKind, ProgLog, ProgLogBuilder};
+use rayon::prelude::*;
+use seq_io::fastq::{self, OwnedRecord, Record};
 use std::process::ExitCode;
 use std::{
     fs::File,
@@ -10,20 +23,6 @@ use std::{
     str::FromStr,
 };
 use structopt::clap::arg_enum;
-//use std::sys_common::AsInner;
-use anyhow::{bail, ensure, Context, Result};
-use env_logger::Env;
-use flate2::bufread::MultiGzDecoder;
-use flume::{bounded, Receiver, Sender};
-use fqgrep_lib::matcher::{validate_fixed_pattern, Matcher, MatcherFactory, MatcherOpts};
-use fqgrep_lib::{is_fastq_path, is_gzip_path};
-use gzp::BUFSIZE;
-use itertools::{self, izip, Itertools};
-use lazy_static::lazy_static;
-use parking_lot::Mutex;
-use proglog::{CountFormatterKind, ProgLog, ProgLogBuilder};
-use rayon::prelude::*;
-use seq_io::fastq::{self, OwnedRecord, Record};
 use structopt::{clap::AppSettings, StructOpt};
 
 /// The number of reads in a chunk
@@ -532,8 +531,6 @@ fn setup() -> Opts {
 // Tests
 #[cfg(test)]
 pub mod tests {
-    use std::{fs, path};
-
     use crate::*;
     use fgoxide::io::Io;
     use seq_io::fastq::{OwnedRecord, Record};
@@ -718,8 +715,8 @@ pub mod tests {
     }
 
     // ############################################################################################
-    // Tests four paired fastqs for NGG or AA in paired reads for count and interleave order when
-    // count is false
+    // Tests four paired fastqs for NGG or AA in paired reads when --count is true and false
+    // Tests for correct interleave order when --count is false
     // ############################################################################################
     #[test]
     fn test_paired_reads_when_count_true_false() {
@@ -755,10 +752,10 @@ pub mod tests {
             ("TCGT"), // R1, R2, R2, R1
         ];
 
-        assert_eq!(expected_sequences_correct_interleave, return_sequences); // expected_sequences = correct interleave order
-        assert_ne!(expected_sequences_incorrect_interleave, return_sequences); // expected_sequences = incorrect interleave order
+        assert_eq!(expected_sequences_correct_interleave, return_sequences); // correct interleave order
+        assert_ne!(expected_sequences_incorrect_interleave, return_sequences); // incorrect interleave order
 
-        // Test output from count with unpaired reads
+        // Test output from count with paired reads
         opts_test.count = true;
         opts_test.output = None;
         opts_test.paired = true;
@@ -768,8 +765,9 @@ pub mod tests {
     }
 
     // ############################################################################################
-    // Tests two fastqs for 'TGGATTCAGACTT' which is only found once in the reverse complement.
-    // Tests both paired an unpaired
+    // Tests two fastqs for 'TGGATTCAGACTT' which is only found once in the reverse complement
+    // Tests inverse_match
+    // Tests both paired and unpaired reads
     // ############################################################################################
     #[test]
     fn test_reverse_complement_invert() {
@@ -810,7 +808,7 @@ pub mod tests {
     }
 
     // ############################################################################################
-    // Tests that an error is thrown when fixed_strings is true and regex is present
+    // Tests that an error is returned when fixed_strings is true and regex is present
     // ############################################################################################
     #[test]
     fn test_regexp_fixed_string() {
@@ -838,19 +836,19 @@ pub mod tests {
 
         // Test for 1 match with fixed_strings as true
         opts_test.fixed_strings = true;
-        let result = fqgrep_from_opts(&mut opts_test); // test with more granularity in matcher.rs
+        let result = fqgrep_from_opts(&mut opts_test);
         assert_eq!(result.unwrap(), 1);
 
         // Should return error when regular expression is classified as fixed_string
         opts_test.regexp = test_pattern_regex;
         opts_test.fixed_strings = true;
-        let result = fqgrep_from_opts(&mut opts_test); // test with more granularity in matcher.rs
+        let result = fqgrep_from_opts(&mut opts_test);
         assert!(result.is_err());
 
-        // Should return error with a mix of string and regular expression when fixed_string is true
+        // Should return error when a string and regular expression are classified as fixed_string
         opts_test.regexp = test_pattern_both;
         opts_test.fixed_strings = true;
-        let result = fqgrep_from_opts(&mut opts_test); // test with more granularity in matcher.rs
+        let result = fqgrep_from_opts(&mut opts_test);
         assert!(result.is_err());
     }
 
@@ -866,7 +864,7 @@ pub mod tests {
             vec!["GGGTCTGAATCCATGGAAAGCTATTG"],
         ];
 
-        let test_pattern = vec![String::from("^G")]; // should match two records
+        let test_pattern = vec![String::from("^G")];
 
         let mut opts_test = build_opts(&dir, &seqs, &test_pattern, true, None, String::from(".fq"));
 
@@ -890,7 +888,7 @@ pub mod tests {
             vec!["GGGTCTGAATCCATGGAAAGCTATTG"],
         ];
 
-        let test_pattern = vec![String::from("^G")]; // should match two records
+        let test_pattern = vec![String::from("^G")];
         let mut opts_test = build_opts(&dir, &seqs, &test_pattern, true, None, String::from(".fq"));
 
         // Test pattern from file
@@ -915,7 +913,7 @@ pub mod tests {
             vec!["GGGTCTGAATCCATGGAAAGCTATTG"],
         ];
 
-        let test_pattern = vec![String::from("^G")]; // should match three records
+        let test_pattern = vec![String::from("^G")];
 
         // Test .fq
         let mut opts_test = build_opts(&dir, &seqs, &test_pattern, true, None, String::from(".fq"));
