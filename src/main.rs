@@ -281,38 +281,6 @@ fn read_patterns(file: &PathBuf) -> Result<Vec<String>> {
     Ok(v)
 }
 
-//f//n handle(outer: Result<Result<usize, dyn Error>, Box<dyn Any + Send>>) -> ExitCode {
-// Set the exit code:
-// - exit code 0 if there were matches
-// - exit code 1 if there were no matches
-// - exit code 2 if fqgrep returned an error
-// - exit code 101 if fqgrep panicked
-//match outer {
-// move to function
-//Err(_) => {
-//eprintln!("Error: fqgrep panicked.  Please report this as a bug!");
-//ExitCode::from(101)
-//}
-// Ok(inner) => match inner {
-// Ok(0) => ExitCode::from(1),
-// Ok(_) => ExitCode::SUCCESS,
-// Err(e) => {
-//     eprintln!("Error: {}", e);
-//     ExitCode::from(2)
-// }
-// },
-// }
-//}
-
-//fn main_dev() -> ExitCode {
-//    // Set the exit code:
-//    // - exit code 0 if there were matches
-//    // - exit code 1 if there were no matches
-//    // - exit code 2 if fqgrep returned an error
-//    // - exit code 101 if fqgrep panicked
-//    handle(std::panic::catch_unwind(fqgrep))
-//}
-
 fn main() -> ExitCode {
     // Set the exit code:
     // - exit code 0 if there were matches
@@ -564,12 +532,11 @@ fn setup() -> Opts {
 // Tests
 #[cfg(test)]
 pub mod tests {
-    use std::fs;
+    use std::{fs, path};
 
     use crate::*;
     use fgoxide::io::Io;
     use seq_io::fastq::{OwnedRecord, Record};
-    //use std::{assert_matches::assert_matches, fs};
     use tempfile::TempDir;
 
     /// Returns the path(s)  of type `Vec<String>` to the fastq(s) written from the provided sequence
@@ -719,14 +686,6 @@ pub mod tests {
         return_seqs
     }
 
-    /// Returns exit code from main()
-    ///
-    ///
-    //fn test_main(opts: &mut Opts) -> ExitCode {
-    //handle(std::panic::catch_unwind(fqgrep_from_opts(opts)))
-    //}
-
-    /// .
     // ############################################################################################
     // Tests four unpaired fastqs for NGG or AA when --count is true and false
     // ############################################################################################
@@ -986,142 +945,5 @@ pub mod tests {
         );
         let result = fqgrep_from_opts(&mut opts_test);
         assert_eq!(result.unwrap(), 3);
-    }
-
-    // ################################## Scratch/Dev #############################################
-
-    // ############################################################################################
-    // Tests that main returns expected exit code (excluding Exit Code 101 panic)
-    // ############################################################################################
-    #[test]
-    #[ignore]
-    fn test_exit_code() {
-        let dir = TempDir::new().unwrap();
-        let seqs = vec![
-            vec!["AAGT", "TCGT"],
-            vec!["GGGGT", "GGGG"],
-            vec!["TTTT", "CCCC"],
-            vec!["TCTC", "CGCG"],
-        ];
-
-        // ExitCode(1)
-        //let test_pattern = vec![String::from("......C")]; // should not match anything
-        //let mut opts_testcase_none =
-        //    build_opts(&dir, &seqs, &test_pattern, true, None, String::from(".fq"));
-        //let exit_code_one = test_main(&mut opts_testcase_paired).to_i32();
-        //let exit_code_one = test_main(&mut opts_testcase_none);
-        //assert_eq!(1, exit_code_one);
-
-        //ExitCode(SUCCESS)
-        //let test_pattern = vec![String::from("^C")]; // should match 2 reads
-        //let mut opts_testcase_success =
-        //    build_opts(&dir, &seqs, &test_pattern, true, None, String::from(".fq"));
-        //let exit_code_success = test_main(&mut opts_testcase_success);
-        //assert_eq!(3, exit_code_success);
-
-        //ExitCode(2)
-        //TODO write opts that throws error that can be caught in test_main
-        //let test_pattern = vec![String::from("^C")]; // should match 2 reads
-        //let mut opts_testcase_fail = build_opts(&dir, &seqs, &test_pattern, true, None);
-        //let exit_code_fail = test_main(&mut opts_testcase_fail);
-        //assert_eq!(2, exit_code_fail);
-    }
-
-    /// Test that when expect statements are violated errors are returned
-    ///
-    #[test]
-    #[ignore]
-    //#[should_panic(expected = "failed writing read")]
-    fn test_expect_statements() {
-        let dir = TempDir::new().unwrap();
-        let seqs = vec![vec!["ATG"], vec!["AAA"]];
-
-        let test_pattern = vec![String::from("A")];
-
-        let mut opts_testcase_out_file =
-            build_opts(&dir, &seqs, &test_pattern, true, None, String::from(".fq"));
-
-        // delete pattern_path
-        //let mut path_del = &opts_testcase_out_file.file;
-        //fs::remove_dir(&dir);
-        println!("here");
-        println!("{:?}", opts_testcase_out_file.file);
-        let f = opts_testcase_out_file.file;
-        drop(dir);
-        //let result_deleted_file = read_patterns(f.as_ref());
-        //println!("here");
-        //println!("{:?}", result_deleted_file.unwrap());
-
-        //println!("{:?}", result_deleted_file.unwrap());
-        //let result_args = fqgrep_from_opts(&mut opts_testcase_args);
-
-        //assert!(result_deleted_file.is_err()); // "failed writing read"
-        //assert!(result_args.is_err()); // opts.args is empty - "Pattern must be given with -e or as the first positional argument "
-    }
-
-    /// Tests two fastqs for a seq that starts with A and check the output
-    ///
-    #[test]
-    #[ignore]
-    fn test_get_output() {
-        let dir: TempDir = TempDir::new().unwrap();
-        let out_path = dir.path().join(String::from("output.fq"));
-        // TODO: refactor
-        let result_path = &out_path.clone();
-        let seqs = vec![
-            vec!["AAGTCTGAATCCATGGAAAGCTATTG"],
-            vec!["GGGTCTGAATCCATGGAAAGCTATTG"],
-            vec!["GGGGGGGGGGGGTTTTTTTTTTTTTT"],
-        ];
-        let test_pattern = vec![String::from("AA")];
-        let mut opts_testcase = build_opts(
-            &dir,
-            &seqs,
-            &test_pattern,
-            true,
-            Some(out_path),
-            String::from(".fq"),
-        );
-        let _result = fqgrep_from_opts(&mut opts_testcase);
-        let return_sequences = slurp_output(result_path.to_path_buf());
-        let expected_sequences = vec![
-            ("AAGTCTGAATCCATGGAAAGCTATTG"),
-            ("GGGTCTGAATCCATGGAAAGCTATTG"),
-        ];
-        assert_eq!(expected_sequences, return_sequences);
-    }
-    /// Test that when ensure statements are violated errors are returned
-    ///
-    #[test]
-    #[ignore]
-    //#[should_panic]
-    fn test_ensure_dev() {
-        let dir = TempDir::new().unwrap();
-        let seqs = vec![
-            vec!["GTCAGCTCGAGCATCAGCTACGCACT"],
-            vec!["AGTGCGTAGCTGATGCTCGAGCTGAC"],
-            vec!["GGGTCTGAATCCATGGAAAGCTATTG"],
-        ];
-
-        let test_pattern = vec![String::from("^G")]; // should match two records
-
-        let mut opts_testcase_paired =
-            build_opts(&dir, &seqs, &test_pattern, true, None, String::from(".fq"));
-        let mut opts_testcase_args =
-            build_opts(&dir, &seqs, &test_pattern, true, None, String::from(".fq"));
-
-        opts_testcase_paired.paired = true;
-        opts_testcase_args.args = vec![
-            String::from("/path/does/not/exist/sample_one.fq"),
-            String::from("/path/does/not/exist/sample_two.fq"),
-        ];
-
-        let result_paired = fqgrep_from_opts(&mut opts_testcase_paired);
-        // TODO
-        let result_args = fqgrep_from_opts(&mut opts_testcase_args); // hangs
-        println!("{:?}", &result_args);
-
-        //assert!(result_paired.is_err()); // incorrect number of files for paired read input - must be single file or multiple of two
-        //assert!(result_args.unwrap_err().is_err()); // opts.args is empty - "Pattern must be given with -e or as the first positional argument "
     }
 }
