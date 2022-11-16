@@ -770,7 +770,7 @@ pub mod tests {
     // Tests both paired and unpaired reads
     // ############################################################################################
     #[test]
-    fn test_reverse_complement_invert() {
+    fn test_reverse_complement_and_invert_match() {
         let dir = TempDir::new().unwrap();
         let seqs = vec![
             vec!["GTCAGCTCGAGCATCAGCTACGCACT", "GGGTCTGAATCCATGGAAAGCTATTG"],
@@ -811,7 +811,7 @@ pub mod tests {
     // Tests that an error is returned when fixed_strings is true and regex is present
     // ############################################################################################
     #[test]
-    fn test_regexp_fixed_string() {
+    fn test_regexp_from_fixed_string_fails_with_regex() {
         let dir = TempDir::new().unwrap();
         let seqs = vec![
             vec!["GTCAGCTCGAGCATCAGCTACGCACT", "GGGTCTGAATCCATGGAAAGCTATTG"],
@@ -856,7 +856,7 @@ pub mod tests {
     // Tests that ensure! is violated when thrree records are defined as paired reads
     // ############################################################################################
     #[test]
-    fn test_ensure_paired() {
+    fn test_paired_fails_with_three_sequences() {
         let dir = TempDir::new().unwrap();
         let seqs = vec![
             vec!["GTCAGCTCGAGCATCAGCTACGCACT"],
@@ -880,7 +880,7 @@ pub mod tests {
     // string
     // ############################################################################################
     #[test]
-    fn test_regexp_format() {
+    fn test_regexp_matches_from_file_and_string() {
         let dir = TempDir::new().unwrap();
         let seqs = vec![
             vec!["GTCAGCTCGAGCATCAGCTACGCACT"],
