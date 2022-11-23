@@ -161,7 +161,7 @@ fn spawn_reader(file: PathBuf, decompress: bool) -> Receiver<Vec<OwnedRecord>> {
 }
 
 arg_enum! {
-    #[derive(PartialEq, Debug)]
+    #[derive(PartialEq, Debug, Clone)]
     enum Color {
     Never,
     Always,
@@ -196,7 +196,7 @@ arg_enum! {
 /// The fqgrep utility exits with one of the following values:
 /// 0 if one or more lines were selected, 1 if no lines were selected, and >1 if an error occurred.
 ///
-#[derive(StructOpt, Debug)]
+#[derive(StructOpt, Debug, Clone)]
 #[structopt(
     name = "fqgrep", 
     global_setting(AppSettings::ColoredHelp),
@@ -280,58 +280,72 @@ fn read_patterns(file: &PathBuf) -> Result<Vec<String>> {
     Ok(v)
 }
 
+/// Runs fqgrep and converts Option<u8> to ExitCode 
+///
+/// Set the exit code:
+/// - exit code SUCCESS if there were matches
+/// - exit code 1 if there were no matches
+/// - exit code 2 if fqgrep returned an error
+/// - exit code 101 if panic
 fn main() -> ExitCode {
-    // Set the exit code:
-    // - exit code 0 if there were matches
-    // - exit code 1 if there were no matches
-    // - exit code 2 if fqgrep returned an error
-    // - exit code 101 if fqgrep panicked
-    let outer = std::panic::catch_unwind(fqgrep);
+    // Receives u8 from 
+    if let Some(fqgrep_output) = fqgrep(&setup()) {
+        ExitCode::from(fqgrep_output)
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+/// Runs fqgrep_from_opts and returns None upon success and an error number if error or zero matches
+///
+/// - None if there were matches
+/// - 1 if there were no matches
+/// - 2 if fqgrep_from_opts returned an error
+/// - 101 if fqgrep_from_opts panicked
+fn fqgrep(opts: &Opts) -> Option<u8> {
+    let outer = std::panic::catch_unwind(|| fqgrep_from_opts(&opts));
     match outer {
         Err(_) => {
             eprintln!("Error: fqgrep panicked.  Please report this as a bug!");
-            ExitCode::from(101)
+            Some(101)
         }
         Ok(inner) => match inner {
-            Ok(0) => ExitCode::from(1),
-            Ok(_) => ExitCode::SUCCESS,
+            Ok(0) => Some(1),
+            Ok(_) => None,
             Err(e) => {
                 eprintln!("Error: {}", e);
-                ExitCode::from(2)
+                Some(2)
             }
         },
     }
 }
 
-fn fqgrep() -> Result<usize> {
-    let mut opts = setup();
-    fqgrep_from_opts(&mut opts)
-}
-
 #[allow(clippy::too_many_lines)]
-fn fqgrep_from_opts(opts: &mut Opts) -> Result<usize> {
+fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
+    let mut mutable_opts = opts.clone();
     // Add patterns from a file if given
-    if let Some(file) = &opts.file {
+    if let Some(file) = &mutable_opts.file {
         for pattern in read_patterns(file)? {
-            opts.regexp.push(pattern);
+            mutable_opts.regexp.push(pattern);
         }
     }
 
     // Inspect the positional arguments to extract a fixed pattern
     let (pattern, mut files): (Option<String>, Vec<PathBuf>) = {
-        let (pattern, file_strings): (Option<String>, Vec<String>) = if opts.regexp.is_empty() {
-            // No patterns given by -e, so assume the first positional argument is the pattern and
-            // the rest are files
-            ensure!(
-                !opts.args.is_empty(),
-                "Pattern must be given with -e or as the first positional argument "
-            );
-            let files = opts.args.iter().skip(1).cloned().collect();
-            (Some(opts.args[0].clone()), files)
-        } else {
-            // Patterns given by -e, so assume all positional arguments are files
-            (None, opts.args.clone())
-        };
+        let (pattern, file_strings): (Option<String>, Vec<String>) =
+            if mutable_opts.regexp.is_empty() {
+                // No patterns given by -e, so assume the first positional argument is the pattern and
+                // the rest are files
+                ensure!(
+                    !mutable_opts.args.is_empty(),
+                    "Pattern must be given with -e or as the first positional argument "
+                );
+                let files = mutable_opts.args.iter().skip(1).cloned().collect();
+                (Some(mutable_opts.args[0].clone()), files)
+            } else {
+                // Patterns given by -e, so assume all positional arguments are files
+                (None, mutable_opts.args.clone())
+            };
 
         // Convert file strings into paths
         let files = file_strings
@@ -346,7 +360,7 @@ fn fqgrep_from_opts(opts: &mut Opts) -> Result<usize> {
     };
 
     // Ensure that if multiple files are given, its a multiple of two.
-    if opts.paired {
+    if mutable_opts.paired {
         ensure!(
             files.len() <= 1 || files.len() % 2 == 0,
             "Input files must be a multiple of two, or either a single file or standard input (assume interleaved) with --paired"
@@ -354,11 +368,11 @@ fn fqgrep_from_opts(opts: &mut Opts) -> Result<usize> {
     }
 
     // Validate the fixed string pattern, if fixed-strings are specified
-    if opts.fixed_strings {
+    if mutable_opts.fixed_strings {
         if let Some(pattern) = &pattern {
             validate_fixed_pattern(pattern)?;
-        } else if !opts.regexp.is_empty() {
-            for pattern in &opts.regexp {
+        } else if !mutable_opts.regexp.is_empty() {
+            for pattern in &mutable_opts.regexp {
                 validate_fixed_pattern(pattern)?;
             }
         } else {
@@ -367,7 +381,7 @@ fn fqgrep_from_opts(opts: &mut Opts) -> Result<usize> {
     }
 
     // Set up a progress logger if desired
-    let progress_logger = if opts.progress {
+    let progress_logger = if mutable_opts.progress {
         Some(
             ProgLogBuilder::new()
                 .name("fqgrep-progress")
@@ -382,19 +396,24 @@ fn fqgrep_from_opts(opts: &mut Opts) -> Result<usize> {
     };
 
     // Build the common pattern matching options
-    let match_opts = MatcherOpts {
-        invert_match: opts.invert_match,
-        reverse_complement: opts.reverse_complement,
-        color: opts.color == Color::Always || (opts.color == Color::Auto && stdout_isatty()),
+    let match_mutable_opts = MatcherOpts {
+        invert_match: mutable_opts.invert_match,
+        reverse_complement: mutable_opts.reverse_complement,
+        color: mutable_opts.color == Color::Always
+            || (mutable_opts.color == Color::Auto && stdout_isatty()),
     };
 
     // The matcher used in the primary search
-    let matcher: Box<dyn Matcher + Sync + Send> =
-        MatcherFactory::new_matcher(&pattern, opts.fixed_strings, &opts.regexp, match_opts);
+    let matcher: Box<dyn Matcher + Sync + Send> = MatcherFactory::new_matcher(
+        &pattern,
+        mutable_opts.fixed_strings,
+        &mutable_opts.regexp,
+        match_mutable_opts,
+    );
 
     // The thread pool from which threads are spanwed.
     let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(opts.threads)
+        .num_threads(mutable_opts.threads)
         .build()
         .unwrap();
 
@@ -402,7 +421,12 @@ fn fqgrep_from_opts(opts: &mut Opts) -> Result<usize> {
     let (count_tx, count_rx): (Sender<usize>, Receiver<usize>) = bounded(1);
 
     // The writer of final counts or matching records
-    let writer = FastqWriter::new(count_tx, opts.count, opts.paired, opts.output.clone());
+    let writer = FastqWriter::new(
+        count_tx,
+        mutable_opts.count,
+        mutable_opts.paired,
+        mutable_opts.output.clone(),
+    );
 
     // The main loop
     pool.install(|| {
@@ -411,12 +435,12 @@ fn fqgrep_from_opts(opts: &mut Opts) -> Result<usize> {
             // read from standard input
             files.push(PathBuf::from_str("-").unwrap());
         }
-        if opts.paired {
+        if mutable_opts.paired {
             // Either an interleaved paired end FASTQ, or pairs of FASTQs
             if files.len() == 1 {
                 // Interleaved paired end FASTQ
                 // The channel FASTQ record chunks are received after being read in
-                let rx = spawn_reader(files[0].clone(), opts.decompress);
+                let rx = spawn_reader(files[0].clone(), mutable_opts.decompress);
                 for reads in izip!(rx.iter()) {
                     let paired_reads = reads
                         .into_iter()
@@ -428,8 +452,8 @@ fn fqgrep_from_opts(opts: &mut Opts) -> Result<usize> {
                 // Pairs of FASTQ files
                 for file_pairs in files.chunks_exact(2) {
                     // The channels for R1 and R2 with FASTQ record chunks that are received after being read in
-                    let rx1 = spawn_reader(file_pairs[0].clone(), opts.decompress);
-                    let rx2 = spawn_reader(file_pairs[1].clone(), opts.decompress);
+                    let rx1 = spawn_reader(file_pairs[0].clone(), mutable_opts.decompress);
+                    let rx2 = spawn_reader(file_pairs[1].clone(), mutable_opts.decompress);
                     for (reads1, reads2) in izip!(rx1.iter(), rx2.iter()) {
                         let paired_reads = reads1.into_iter().zip(reads2.into_iter()).collect_vec();
                         process_paired_reads(paired_reads, &matcher, &writer, &progress_logger);
@@ -440,7 +464,7 @@ fn fqgrep_from_opts(opts: &mut Opts) -> Result<usize> {
             // Process one FASTQ at a time
             for file in files {
                 // The channel FASTQ record chunks are received after being read in
-                let rx = spawn_reader(file.clone(), opts.decompress);
+                let rx = spawn_reader(file.clone(), mutable_opts.decompress);
                 for reads in rx.iter() {
                     // Get the matched reads
                     let matched_reads: Vec<OwnedRecord> = reads
@@ -533,6 +557,7 @@ fn setup() -> Opts {
 pub mod tests {
     use crate::*;
     use fgoxide::io::Io;
+    use rstest::rstest;
     use seq_io::fastq::{OwnedRecord, Record};
     use tempfile::TempDir;
 
@@ -696,21 +721,21 @@ pub mod tests {
             vec!["TCTC", "CGCG"],
         ];
         let test_pattern = vec![String::from(".GG"), String::from("AA")];
-        let mut opts_test = build_opts(&dir, &seqs, &test_pattern, true, None, String::from(".fq"));
+        let mut opts = build_opts(&dir, &seqs, &test_pattern, true, None, String::from(".fq"));
 
         // Test output from file
         let out_path = dir.path().join(String::from("output.fq"));
         let result_path = &out_path.clone();
-        opts_test.output = Some(out_path);
-        opts_test.count = false;
-        let _result = fqgrep_from_opts(&mut opts_test);
+        opts.output = Some(out_path);
+        opts.count = false;
+        let _result = fqgrep_from_opts(&opts);
         let return_sequences = slurp_output(result_path.to_path_buf());
         let expected_sequences = vec![("AAGT"), ("GGGGT"), ("GGGG")];
         assert_eq!(expected_sequences, return_sequences); // count = false
 
         // Test output from count
-        opts_test.count = true;
-        let result = fqgrep_from_opts(&mut opts_test);
+        opts.count = true;
+        let result = fqgrep_from_opts(&opts);
         assert_eq!(result.unwrap(), 3); // count = true
     }
 
@@ -728,15 +753,15 @@ pub mod tests {
             vec!["TCTC", "CGCG"],
         ];
         let test_pattern = vec![String::from(".GG"), String::from("AA")];
-        let mut opts_test = build_opts(&dir, &seqs, &test_pattern, true, None, String::from(".fq"));
+        let mut opts = build_opts(&dir, &seqs, &test_pattern, true, None, String::from(".fq"));
 
         // Test output from file with paired reads
         let out_path = dir.path().join(String::from("output.fq"));
         let result_path = &out_path.clone();
-        opts_test.count = false;
-        opts_test.output = Some(out_path);
-        opts_test.paired = true;
-        let _result = fqgrep_from_opts(&mut opts_test);
+        opts.count = false;
+        opts.output = Some(out_path);
+        opts.paired = true;
+        let _result = fqgrep_from_opts(&opts);
         let return_sequences = slurp_output(result_path.to_path_buf());
 
         let expected_sequences_correct_interleave = vec![
@@ -756,11 +781,11 @@ pub mod tests {
         assert_ne!(expected_sequences_incorrect_interleave, return_sequences); // incorrect interleave order
 
         // Test output from count with paired reads
-        opts_test.count = true;
-        opts_test.output = None;
-        opts_test.paired = true;
+        opts.count = true;
+        opts.output = None;
+        opts.paired = true;
 
-        let result = fqgrep_from_opts(&mut opts_test);
+        let result = fqgrep_from_opts(&opts);
         assert_eq!(result.unwrap(), 2); // match count is 2
     }
 
@@ -769,94 +794,68 @@ pub mod tests {
     // Tests inverse_match
     // Tests both paired and unpaired reads
     // ############################################################################################
-    #[test]
-    fn test_reverse_complement_and_invert_match() {
+    #[rstest]
+    #[case(false, false, false, 0)] // unpaired: zero matches when invert_match and reverse_complement are false
+    #[case(false, false, true, 1)] //  unpaired: one match when invert_match is false and reverse_complement is true
+    #[case(false, true, false, 4)] //  unpaired: four matches when invert_match is true and reverse_complement is false
+    #[case(false, true, true, 3)] // unpaired: three matches when invert_match and reverse_complement are true
+    #[case(true, false, false, 0)] // paired: zero matches when invert_match and reverse_complement are false
+    #[case(true, false, true, 1)] //  paired: one match when invert_match is false and reverse_complement is true
+    #[case(true, true, false, 2)] //  paired: two matches when invert_match is true and reverse_complement is false
+    #[case(true, true, true, 2)] // paired: two matches when invert_match and reverse_complement are true
+
+    fn test_reverse_complement_and_invert_match(
+        #[case] paired: bool,
+        #[case] invert_match: bool,
+        #[case] reverse_complement: bool,
+        #[case] expected: usize,
+    ) {
         let dir = TempDir::new().unwrap();
-        let seqs = vec![
-            vec!["GTCAGCTCGAGCATCAGCTACGCACT", "GGGTCTGAATCCATGGAAAGCTATTG"],
-            vec!["AGTGCGTAGCTGATGCTCGAGCTGAC", "AAGTCTGAATCCATGGAAAGCTATTG"],
-        ];
-        let test_pattern = vec![String::from("TGGATTCAGACTT")];
-        let mut opts_test =
-            build_opts(&dir, &seqs, &test_pattern, false, None, String::from(".fq"));
+        let seqs = vec![vec!["GGGG", "GGGG"], vec!["AAAA", "CCCC"]];
+        let pattern = vec![String::from("TTTT")];
+        let mut opts = build_opts(&dir, &seqs, &pattern, false, None, String::from(".fq"));
 
-        // Test unpaired reads for 0 matches when reverse_complement is false
-        let result = fqgrep_from_opts(&mut opts_test);
-        assert_eq!(result.unwrap(), 0);
+        opts.paired = paired;
+        opts.invert_match = invert_match;
+        opts.reverse_complement = reverse_complement;
 
-        // Test unpaired reads for one match when reverse_complement is true
-        opts_test.reverse_complement = true;
-        let result = fqgrep_from_opts(&mut opts_test);
-        assert_eq!(result.unwrap(), 1);
-
-        // Test paired reads for 1 match when reverse_complement is true
-        opts_test.paired = true;
-        let result = fqgrep_from_opts(&mut opts_test);
-        assert_eq!(result.unwrap(), 1);
-
-        // Test unpaired read for 4 matches when invert_match is true
-        opts_test.invert_match = true;
-        opts_test.paired = false;
-        opts_test.reverse_complement = false;
-        let result = fqgrep_from_opts(&mut opts_test);
-        assert_eq!(result.unwrap(), 4);
-
-        // Test paired read for 2 matches when invert_match is true
-        opts_test.paired = true;
-        let result = fqgrep_from_opts(&mut opts_test);
-        assert_eq!(result.unwrap(), 2);
+        let result = fqgrep_from_opts(&opts);
+        assert_eq!(result.unwrap(), expected);
     }
 
     // ############################################################################################
     // Tests that an error is returned when fixed_strings is true and regex is present
     // ############################################################################################
-    #[test]
-    fn test_regexp_from_fixed_string_fails_with_regex() {
+    #[rstest]
+    #[should_panic(
+        expected = "called `Result::unwrap()` on an `Err` value: Fixed pattern must contain only DNA bases:  .. [^] .. G"
+    )]
+    #[case(true, vec![String::from("^G")])] // panic with single regex
+    #[should_panic(
+        expected = "called `Result::unwrap()` on an `Err` value: Fixed pattern must contain only DNA bases:  .. [^] .. A"
+    )]
+    #[case(true, vec![String::from("^A"),String::from("AA")])] // panic with combination of regex and fixed string
+    fn test_regexp_from_fixed_string_fails_with_regex(
+        #[case] fixed_strings: bool,
+        #[case] pattern: Vec<String>,
+    ) {
         let dir = TempDir::new().unwrap();
-        let seqs = vec![
-            vec!["GTCAGCTCGAGCATCAGCTACGCACT", "GGGTCTGAATCCATGGAAAGCTATTG"],
-            vec!["AGTGCGTAGCTGATGCGCTACGCACT", "AAGTCTGAATCCATGGAAAGCTATTG"],
-        ];
+        let seqs = vec![vec!["GGGG", "TTTT"], vec!["AAAA", "CCCC"]];
 
-        let test_pattern_fixed = vec![String::from("GGGTCTGAATCCATGGAAAGCTATTG")];
-        let test_pattern_regex = vec![String::from("^A")];
-        let test_pattern_both = vec![
-            String::from("^A"),
-            String::from("GGGTCTGAATCCATGGAAAGCTATTG"),
-        ];
+        let mut opts = build_opts(&dir, &seqs, &pattern, true, None, String::from(".fq"));
 
-        let mut opts_test = build_opts(
-            &dir,
-            &seqs,
-            &test_pattern_fixed,
-            true,
-            None,
-            String::from(".fq"),
-        );
-
-        // Test for 1 match with fixed_strings as true
-        opts_test.fixed_strings = true;
-        let result = fqgrep_from_opts(&mut opts_test);
-        assert_eq!(result.unwrap(), 1);
-
-        // Should return error when regular expression is classified as fixed_string
-        opts_test.regexp = test_pattern_regex;
-        opts_test.fixed_strings = true;
-        let result = fqgrep_from_opts(&mut opts_test);
-        assert!(result.is_err());
-
-        // Should return error when a string and regular expression are classified as fixed_string
-        opts_test.regexp = test_pattern_both;
-        opts_test.fixed_strings = true;
-        let result = fqgrep_from_opts(&mut opts_test);
-        assert!(result.is_err());
+        opts.fixed_strings = fixed_strings;
+        let _result = fqgrep_from_opts(&opts);
+        _result.unwrap();
     }
-
     // ############################################################################################
-    // Tests that ensure! is violated when thrree records are defined as paired reads
+    // Tests error is returned from main when three records are defined as paired
     // ############################################################################################
     #[test]
-    fn test_paired_fails_with_three_sequences() {
+    #[should_panic(
+        expected = "Input files must be a multiple of two, or either a single file or standard input (assume interleaved) with --paired"
+    )]
+    fn test_paired_should_panic_with_three_records() {
         let dir = TempDir::new().unwrap();
         let seqs = vec![
             vec!["GTCAGCTCGAGCATCAGCTACGCACT"],
@@ -864,15 +863,12 @@ pub mod tests {
             vec!["GGGTCTGAATCCATGGAAAGCTATTG"],
         ];
 
-        let test_pattern = vec![String::from("^G")];
-
+        let test_pattern = vec![String::from("A")];
         let mut opts_test = build_opts(&dir, &seqs, &test_pattern, true, None, String::from(".fq"));
 
         opts_test.paired = true;
-
-        let result = fqgrep_from_opts(&mut opts_test);
-
-        assert!(result.is_err()); // incorrect number of files for paired read input - must be single file or multiple of two
+        let _num_matches = fqgrep_from_opts(&opts_test);
+        _num_matches.unwrap();
     }
 
     // ############################################################################################
@@ -892,20 +888,26 @@ pub mod tests {
         let mut opts_test = build_opts(&dir, &seqs, &test_pattern, true, None, String::from(".fq"));
 
         // Test pattern from file
-        let result = fqgrep_from_opts(&mut opts_test);
+        let result = fqgrep_from_opts(&opts_test);
         assert_eq!(result.unwrap(), 2);
 
         // Test pattern from string
         opts_test.regexp = test_pattern;
-        let result = fqgrep_from_opts(&mut opts_test);
+        let result = fqgrep_from_opts(&opts_test);
         assert_eq!(result.unwrap(), 2);
     }
 
     // ############################################################################################
-    // Tests that correct match count is returned from .fq, .gz, and .bgz
+    // Tests that correct match count is returned from .fq, .fastq, .fq.gz, and .fq.bgz
     // ############################################################################################
-    #[test]
-    fn test_fastq_compression() {
+    // Three matches are found from all file types
+    #[rstest]
+    #[case(String::from(".fq"), 3)]
+    #[case(String::from(".fastq"), 3)]
+    #[case(String::from(".fq.gz"), 3)]
+    #[case(String::from(".fq.bgz"), 3)]
+
+    fn test_fastq_compression(#[case] extension: String, #[case] expected: usize) {
         let dir = TempDir::new().unwrap();
         let seqs = vec![
             vec!["GTCAG", "ACGT", "GGTG"],
@@ -915,33 +917,30 @@ pub mod tests {
 
         let test_pattern = vec![String::from("^G")];
 
-        // Test .fq
-        let mut opts_test = build_opts(&dir, &seqs, &test_pattern, true, None, String::from(".fq"));
-        let result = fqgrep_from_opts(&mut opts_test);
-        assert_eq!(result.unwrap(), 3);
+        let opts = build_opts(&dir, &seqs, &test_pattern, true, None, extension);
+        let result = fqgrep_from_opts(&opts);
+        assert_eq!(result.unwrap(), expected);
+    }
 
-        // Test .fq.gz
-        let mut opts_test = build_opts(
-            &dir,
-            &seqs,
-            &test_pattern,
-            true,
-            None,
-            String::from(".fq.gz"),
-        );
-        let result = fqgrep_from_opts(&mut opts_test);
-        assert_eq!(result.unwrap(), 3);
+    // ############################################################################################
+    // Tests ExitCode status 101, 1, None, and 2
+    // ############################################################################################
 
-        // Test .fq.bgz
-        let mut opts_test = build_opts(
-            &dir,
-            &seqs,
-            &test_pattern,
-            true,
-            None,
-            String::from(".fq.bgz"),
-        );
-        let result = fqgrep_from_opts(&mut opts_test);
-        assert_eq!(result.unwrap(), 3);
+    #[rstest]
+    #[case(false, vec![String::from("*")], Some(101))] // invalid regex will panic
+    #[case(false, vec![String::from("^T")], Some(1))] // zero matches ExitCode(1)
+    #[case(true, vec![String::from("GTCAGC")], None)] // one match ExitCode(SUCCESS) fqgrep() returns None
+    #[case(true, vec![String::from("^T")], Some(2))] // returns inner error when regex is declared fixed_string
+
+    fn test_exit_code_catching(
+        #[case] fixed_strings: bool,
+        #[case] pattern: Vec<String>,
+        #[case] expected: Option<u8>,
+    ) {
+        let dir = TempDir::new().unwrap();
+        let seqs = vec![vec!["GTCAGC"], vec!["AGTGCG"], vec!["GGGTCTG"]];
+        let mut opts = build_opts(&dir, &seqs, &pattern, true, None, String::from(".fq"));
+        opts.fixed_strings = fixed_strings;
+        assert_eq!(fqgrep(&opts), expected);
     }
 }
