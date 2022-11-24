@@ -712,26 +712,32 @@ pub mod tests {
     // Tests match with unpaired and paired reads when count is true
     // ############################################################################################
     #[rstest]
+    // Unpaired reads with fixed strings
     #[case(false, vec![String::from("AA")], 1)] // unpaired: fixed string with one match
     #[case(false, vec![String::from("CCCG")], 0)] // unpaired: fixed string with zero matches
     #[case(false, vec![String::from("T")], 3)] // unpaired: fixed string with multiple matches
+    // Unpaired reads with regex
     #[case(false, vec![String::from("^A")], 1)] // unpaired: regex with one match
     #[case(false, vec![String::from("T.....G")], 0)] // unpaired: regex with zero matches
     #[case(false, vec![String::from("G")], 4)] // unpaired: regex with multiple matches
+    // Unpaired reads with mixed patterns
     #[case(false, vec![String::from("GGCC"), String::from("G..C")], 1)] // unpaired: mixed set with one match
     #[case(false, vec![String::from("Z"), String::from("A.....G")], 0)] // unpaired: mixed set with zero matches
     #[case(false, vec![String::from("^T"), String::from("AA")], 3)] // unpaired: mixed set with multiple matches
+    // Paired reads with fixed strings
     #[case(true, vec![String::from("AA")], 1)] // paired: fixed string with one match
     #[case(true, vec![String::from("CCCG")], 0)] // paired: fixed string with zero matches
     #[case(true, vec![String::from("CC")], 2)] // paired: fixed string with multiple matches
+    // Paired reads with regex
     #[case(true, vec![String::from("^A")], 1)] // paired: regex with one match
     #[case(true, vec![String::from("T.....G")], 0)] // paired: regex with zero matches
     #[case(true, vec![String::from("G")], 3)] // paired: regex with multiple matches
+    // Paired reads with mixed patterns
     #[case(true, vec![String::from("GGCC"), String::from("G..C")], 1)] // paired: mixed set with one match
     #[case(true, vec![String::from("Z"), String::from("A.....G")], 0)] // paired: mixed set with zero matches
     #[case(true, vec![String::from("^T"), String::from("AA")], 3)] // paired: mixed set with multiple matches
 
-    fn test_unpaired_reads_when_count_true(
+    fn test_reads_when_count_true(
         #[case] paired: bool,
         #[case] pattern: Vec<String>,
         #[case] expected: usize,
@@ -753,18 +759,23 @@ pub mod tests {
     //Tests match with unpaired and paired reads when count is false
     // ############################################################################################
     #[rstest]
+    // Unpaired reads with fixed strings
     #[case(false, vec![String::from("A")], vec!["AAAA"], true)] // unpaired: fixed string with one match
     #[case(false, vec![String::from("A"), String::from("G")], vec!("AAAA", "GGGG"), true)] // unpaired: fixed string set with two matches
+    // Unpaired reads with regex
     #[case(false, vec![String::from("^A")], vec!["AAAA"], true)] // unpaired: regex with one match
     #[case(false, vec![String::from("^A"), String::from("^G")], vec!("AAAA", "GGGG"), true)] // unpaired: regex set with two matches
-    #[case(true, vec![String::from("A")], vec!["AAAA", "CCCC"], true)] // paired: fixed string with one match
+    // Paired reads with fixed string sets
+    #[case(true, vec![String::from("A"), String::from("AAAA")], vec!["AAAA", "CCCC"], true)] // paired: fixed string with one match
     #[case(true, vec![String::from("A"), String::from("G")], vec!("AAAA", "CCCC", "TTTT", "GGGG"), true)] // paired: fixed string set with two matches in correct interleave order
-    #[case(true, vec![String::from("A"), String::from("G")], vec!("AAAA", "GGGG", "TTTT", "CCCC"), false)] // paired: fixed string set with two matches in incorrect interleave order
-    #[case(true, vec![String::from("^A")], vec!["AAAA", "CCCC"], true)] // paired: regex with one match
+    #[case(true, vec![String::from("A"), String::from("G")], vec!("AAAA", "GGGG", "TTTT", "CCCC"), false)]
+    // paired: fixed string set with two matches in incorrect interleave order
+    // Paired reads with regex sets
+    #[case(true, vec![String::from("^A"), String::from("A$")], vec!["AAAA", "CCCC"], true)] // paired: regex with one match
     #[case(true, vec![String::from("^A"), String::from("^G")], vec!("AAAA", "CCCC", "TTTT", "GGGG"), true)] // paired: regex set with two matches in correct interleave order
     #[case(true, vec![String::from("^A"), String::from("^G")], vec!("AAAA", "GGGG", "TTTT", "CCCC"), false)] // paired: regex set with two matches in incorrect interleave order
 
-    fn test_paired_reads_when_count_false(
+    fn test_reads_when_count_false(
         #[case] paired: bool,
         #[case] pattern: Vec<String>,
         #[case] expected_seq: Vec<&str>,
@@ -797,10 +808,12 @@ pub mod tests {
     // Tests both paired and unpaired reads
     // ############################################################################################
     #[rstest]
+    // Unpaired reads
     #[case(false, false, false, 0)] // unpaired: zero matches when invert_match and reverse_complement are false
     #[case(false, false, true, 1)] //  unpaired: one match when invert_match is false and reverse_complement is true
     #[case(false, true, false, 4)] //  unpaired: four matches when invert_match is true and reverse_complement is false
     #[case(false, true, true, 3)] // unpaired: three matches when invert_match and reverse_complement are true
+    // Paired reads
     #[case(true, false, false, 0)] // paired: zero matches when invert_match and reverse_complement are false
     #[case(true, false, true, 1)] //  paired: one match when invert_match is false and reverse_complement is true
     #[case(true, true, false, 2)] //  paired: two matches when invert_match is true and reverse_complement is false
@@ -929,10 +942,10 @@ pub mod tests {
     // ############################################################################################
 
     #[rstest]
-    #[case(false, vec![String::from("*")], Some(101))] // invalid regex will panic
-    #[case(false, vec![String::from("^T")], Some(1))] // zero matches ExitCode(1)
-    #[case(true, vec![String::from("GTCAGC")], None)] // one match ExitCode(SUCCESS) fqgrep() returns None
-    #[case(true, vec![String::from("^T")], Some(2))] // returns inner error when regex is declared fixed_string
+    #[case(false, vec![String::from("*")], Some(101))] // invalid regex will panic - ExitCode(101)
+    #[case(false, vec![String::from("^T")], Some(1))] // zero matches - ExitCode(1)
+    #[case(true, vec![String::from("GTCAGC")], None)] // one match - ExitCode(SUCCESS) None returned from fqgrep()
+    #[case(true, vec![String::from("^T")], Some(2))] // returns inner error when regex is declared fixed_string - ExitCode(2)
 
     fn test_exit_code_catching(
         #[case] fixed_strings: bool,
