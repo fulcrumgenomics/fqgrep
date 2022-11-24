@@ -280,7 +280,7 @@ fn read_patterns(file: &PathBuf) -> Result<Vec<String>> {
     Ok(v)
 }
 
-/// Runs fqgrep and converts Option<u8> to ExitCode 
+/// Runs fqgrep and converts Option<u8> to ExitCode
 ///
 /// Set the exit code:
 /// - exit code SUCCESS if there were matches
@@ -288,7 +288,7 @@ fn read_patterns(file: &PathBuf) -> Result<Vec<String>> {
 /// - exit code 2 if fqgrep returned an error
 /// - exit code 101 if panic
 fn main() -> ExitCode {
-    // Receives u8 from 
+    // Receives u8 from
     if let Some(fqgrep_output) = fqgrep(&setup()) {
         ExitCode::from(fqgrep_output)
     } else {
@@ -303,7 +303,7 @@ fn main() -> ExitCode {
 /// - 2 if fqgrep_from_opts returned an error
 /// - 101 if fqgrep_from_opts panicked
 fn fqgrep(opts: &Opts) -> Option<u8> {
-    let outer = std::panic::catch_unwind(|| fqgrep_from_opts(&opts));
+    let outer = std::panic::catch_unwind(|| fqgrep_from_opts(opts));
     match outer {
         Err(_) => {
             eprintln!("Error: fqgrep panicked.  Please report this as a bug!");
@@ -709,84 +709,86 @@ pub mod tests {
     }
 
     // ############################################################################################
-    // Tests four unpaired fastqs for NGG or AA when --count is true and false
+    // Tests match with unpaired and paired reads when count is true
     // ############################################################################################
-    #[test]
-    fn test_unpaired_reads_when_count_true_false() {
+    #[rstest]
+    #[case(false, vec![String::from("AA")], 1)] // unpaired: fixed string with one match
+    #[case(false, vec![String::from("CCCG")], 0)] // unpaired: fixed string with zero matches
+    #[case(false, vec![String::from("T")], 3)] // unpaired: fixed string with multiple matches
+    #[case(false, vec![String::from("^A")], 1)] // unpaired: regex with one match
+    #[case(false, vec![String::from("T.....G")], 0)] // unpaired: regex with zero matches
+    #[case(false, vec![String::from("G")], 4)] // unpaired: regex with multiple matches
+    #[case(false, vec![String::from("GGCC"), String::from("G..C")], 1)] // unpaired: mixed set with one match
+    #[case(false, vec![String::from("Z"), String::from("A.....G")], 0)] // unpaired: mixed set with zero matches
+    #[case(false, vec![String::from("^T"), String::from("AA")], 3)] // unpaired: mixed set with multiple matches
+    #[case(true, vec![String::from("AA")], 1)] // paired: fixed string with one match
+    #[case(true, vec![String::from("CCCG")], 0)] // paired: fixed string with zero matches
+    #[case(true, vec![String::from("CC")], 2)] // paired: fixed string with multiple matches
+    #[case(true, vec![String::from("^A")], 1)] // paired: regex with one match
+    #[case(true, vec![String::from("T.....G")], 0)] // paired: regex with zero matches
+    #[case(true, vec![String::from("G")], 3)] // paired: regex with multiple matches
+    #[case(true, vec![String::from("GGCC"), String::from("G..C")], 1)] // paired: mixed set with one match
+    #[case(true, vec![String::from("Z"), String::from("A.....G")], 0)] // paired: mixed set with zero matches
+    #[case(true, vec![String::from("^T"), String::from("AA")], 3)] // paired: mixed set with multiple matches
+
+    fn test_unpaired_reads_when_count_true(
+        #[case] paired: bool,
+        #[case] pattern: Vec<String>,
+        #[case] expected: usize,
+    ) {
         let dir = TempDir::new().unwrap();
         let seqs = vec![
-            vec!["AAGT", "TCGT"],
-            vec!["GGGGT", "GGGG"],
-            vec!["TTTT", "CCCC"],
-            vec!["TCTC", "CGCG"],
+            vec!["AAAA", "TTTT"],
+            vec!["GGGG", "CCCC"],
+            vec!["TTCT", "CGCG"],
+            vec!["GGTT", "GGCC"],
         ];
-        let test_pattern = vec![String::from(".GG"), String::from("AA")];
-        let mut opts = build_opts(&dir, &seqs, &test_pattern, true, None, String::from(".fq"));
-
-        // Test output from file
-        let out_path = dir.path().join(String::from("output.fq"));
-        let result_path = &out_path.clone();
-        opts.output = Some(out_path);
-        opts.count = false;
-        let _result = fqgrep_from_opts(&opts);
-        let return_sequences = slurp_output(result_path.to_path_buf());
-        let expected_sequences = vec![("AAGT"), ("GGGGT"), ("GGGG")];
-        assert_eq!(expected_sequences, return_sequences); // count = false
-
-        // Test output from count
-        opts.count = true;
+        let mut opts = build_opts(&dir, &seqs, &pattern, true, None, String::from(".fq"));
+        opts.paired = paired;
         let result = fqgrep_from_opts(&opts);
-        assert_eq!(result.unwrap(), 3); // count = true
+        assert_eq!(result.unwrap(), expected);
     }
 
     // ############################################################################################
-    // Tests four paired fastqs for NGG or AA in paired reads when --count is true and false
-    // Tests for correct interleave order when --count is false
+    //Tests match with unpaired and paired reads when count is false
     // ############################################################################################
-    #[test]
-    fn test_paired_reads_when_count_true_false() {
-        let dir = TempDir::new().unwrap();
-        let seqs = vec![
-            vec!["AAGT", "TCGT"],
-            vec!["GGGGT", "GGGG"],
-            vec!["TTTT", "CCCC"],
-            vec!["TCTC", "CGCG"],
-        ];
-        let test_pattern = vec![String::from(".GG"), String::from("AA")];
-        let mut opts = build_opts(&dir, &seqs, &test_pattern, true, None, String::from(".fq"));
+    #[rstest]
+    #[case(false, vec![String::from("A")], vec!["AAAA"], true)] // unpaired: fixed string with one match
+    #[case(false, vec![String::from("A"), String::from("G")], vec!("AAAA", "GGGG"), true)] // unpaired: fixed string set with two matches
+    #[case(false, vec![String::from("^A")], vec!["AAAA"], true)] // unpaired: regex with one match
+    #[case(false, vec![String::from("^A"), String::from("^G")], vec!("AAAA", "GGGG"), true)] // unpaired: regex set with two matches
+    #[case(true, vec![String::from("A")], vec!["AAAA", "CCCC"], true)] // paired: fixed string with one match
+    #[case(true, vec![String::from("A"), String::from("G")], vec!("AAAA", "CCCC", "TTTT", "GGGG"), true)] // paired: fixed string set with two matches in correct interleave order
+    #[case(true, vec![String::from("A"), String::from("G")], vec!("AAAA", "GGGG", "TTTT", "CCCC"), false)] // paired: fixed string set with two matches in incorrect interleave order
+    #[case(true, vec![String::from("^A")], vec!["AAAA", "CCCC"], true)] // paired: regex with one match
+    #[case(true, vec![String::from("^A"), String::from("^G")], vec!("AAAA", "CCCC", "TTTT", "GGGG"), true)] // paired: regex set with two matches in correct interleave order
+    #[case(true, vec![String::from("^A"), String::from("^G")], vec!("AAAA", "GGGG", "TTTT", "CCCC"), false)] // paired: regex set with two matches in incorrect interleave order
 
-        // Test output from file with paired reads
+    fn test_paired_reads_when_count_false(
+        #[case] paired: bool,
+        #[case] pattern: Vec<String>,
+        #[case] expected_seq: Vec<&str>,
+        #[case] expected_bool: bool,
+    ) {
+        let dir = TempDir::new().unwrap();
+        let seqs = vec![vec!["AAAA", "TTTT"], vec!["CCCC", "GGGG"]];
         let out_path = dir.path().join(String::from("output.fq"));
         let result_path = &out_path.clone();
-        opts.count = false;
-        opts.output = Some(out_path);
-        opts.paired = true;
+        let mut opts = build_opts(
+            &dir,
+            &seqs,
+            &pattern,
+            true,
+            Some(out_path),
+            String::from(".fq"),
+        );
+
+        opts.paired = paired;
         let _result = fqgrep_from_opts(&opts);
         let return_sequences = slurp_output(result_path.to_path_buf());
 
-        let expected_sequences_correct_interleave = vec![
-            ("AAGT"),
-            ("GGGGT"),
-            ("TCGT"),
-            ("GGGG"), // R1. R2, R1, R2
-        ];
-        let expected_sequences_incorrect_interleave = vec![
-            ("AAGT"),
-            ("GGGGT"),
-            ("GGGG"),
-            ("TCGT"), // R1, R2, R2, R1
-        ];
-
-        assert_eq!(expected_sequences_correct_interleave, return_sequences); // correct interleave order
-        assert_ne!(expected_sequences_incorrect_interleave, return_sequences); // incorrect interleave order
-
-        // Test output from count with paired reads
-        opts.count = true;
-        opts.output = None;
-        opts.paired = true;
-
-        let result = fqgrep_from_opts(&opts);
-        assert_eq!(result.unwrap(), 2); // match count is 2
+        let sequence_match = expected_seq == return_sequences;
+        assert_eq!(sequence_match, expected_bool);
     }
 
     // ############################################################################################
