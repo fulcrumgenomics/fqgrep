@@ -322,29 +322,29 @@ fn fqgrep(opts: &Opts) -> Option<u8> {
 
 #[allow(clippy::too_many_lines)]
 fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
-    let mut mutable_opts = opts.clone();
+    let mut opts = opts.clone();
     // Add patterns from a file if given
-    if let Some(file) = &mutable_opts.file {
+    if let Some(file) = &opts.file {
         for pattern in read_patterns(file)? {
-            mutable_opts.regexp.push(pattern);
+            opts.regexp.push(pattern);
         }
     }
 
     // Inspect the positional arguments to extract a fixed pattern
     let (pattern, mut files): (Option<String>, Vec<PathBuf>) = {
         let (pattern, file_strings): (Option<String>, Vec<String>) =
-            if mutable_opts.regexp.is_empty() {
+            if opts.regexp.is_empty() {
                 // No patterns given by -e, so assume the first positional argument is the pattern and
                 // the rest are files
                 ensure!(
-                    !mutable_opts.args.is_empty(),
+                    !opts.args.is_empty(),
                     "Pattern must be given with -e or as the first positional argument "
                 );
-                let files = mutable_opts.args.iter().skip(1).cloned().collect();
-                (Some(mutable_opts.args[0].clone()), files)
+                let files = opts.args.iter().skip(1).cloned().collect();
+                (Some(opts.args[0].clone()), files)
             } else {
                 // Patterns given by -e, so assume all positional arguments are files
-                (None, mutable_opts.args.clone())
+                (None, opts.args.clone())
             };
 
         // Convert file strings into paths
@@ -360,7 +360,7 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
     };
 
     // Ensure that if multiple files are given, its a multiple of two.
-    if mutable_opts.paired {
+    if opts.paired {
         ensure!(
             files.len() <= 1 || files.len() % 2 == 0,
             "Input files must be a multiple of two, or either a single file or standard input (assume interleaved) with --paired"
@@ -368,11 +368,11 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
     }
 
     // Validate the fixed string pattern, if fixed-strings are specified
-    if mutable_opts.fixed_strings {
+    if opts.fixed_strings {
         if let Some(pattern) = &pattern {
             validate_fixed_pattern(pattern)?;
-        } else if !mutable_opts.regexp.is_empty() {
-            for pattern in &mutable_opts.regexp {
+        } else if !opts.regexp.is_empty() {
+            for pattern in &opts.regexp {
                 validate_fixed_pattern(pattern)?;
             }
         } else {
@@ -381,7 +381,7 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
     }
 
     // Set up a progress logger if desired
-    let progress_logger = if mutable_opts.progress {
+    let progress_logger = if opts.progress {
         Some(
             ProgLogBuilder::new()
                 .name("fqgrep-progress")
@@ -396,24 +396,24 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
     };
 
     // Build the common pattern matching options
-    let match_mutable_opts = MatcherOpts {
-        invert_match: mutable_opts.invert_match,
-        reverse_complement: mutable_opts.reverse_complement,
-        color: mutable_opts.color == Color::Always
-            || (mutable_opts.color == Color::Auto && stdout_isatty()),
+    let match_opts = MatcherOpts {
+        invert_match: opts.invert_match,
+        reverse_complement: opts.reverse_complement,
+        color: opts.color == Color::Always
+            || (opts.color == Color::Auto && stdout_isatty()),
     };
 
     // The matcher used in the primary search
     let matcher: Box<dyn Matcher + Sync + Send> = MatcherFactory::new_matcher(
         &pattern,
-        mutable_opts.fixed_strings,
-        &mutable_opts.regexp,
-        match_mutable_opts,
+        opts.fixed_strings,
+        &opts.regexp,
+        match_opts,
     );
 
     // The thread pool from which threads are spanwed.
     let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(mutable_opts.threads)
+        .num_threads(opts.threads)
         .build()
         .unwrap();
 
@@ -423,9 +423,9 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
     // The writer of final counts or matching records
     let writer = FastqWriter::new(
         count_tx,
-        mutable_opts.count,
-        mutable_opts.paired,
-        mutable_opts.output.clone(),
+        opts.count,
+        opts.paired,
+        opts.output.clone(),
     );
 
     // The main loop
@@ -435,12 +435,12 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
             // read from standard input
             files.push(PathBuf::from_str("-").unwrap());
         }
-        if mutable_opts.paired {
+        if opts.paired {
             // Either an interleaved paired end FASTQ, or pairs of FASTQs
             if files.len() == 1 {
                 // Interleaved paired end FASTQ
                 // The channel FASTQ record chunks are received after being read in
-                let rx = spawn_reader(files[0].clone(), mutable_opts.decompress);
+                let rx = spawn_reader(files[0].clone(), opts.decompress);
                 for reads in izip!(rx.iter()) {
                     let paired_reads = reads
                         .into_iter()
@@ -452,8 +452,8 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
                 // Pairs of FASTQ files
                 for file_pairs in files.chunks_exact(2) {
                     // The channels for R1 and R2 with FASTQ record chunks that are received after being read in
-                    let rx1 = spawn_reader(file_pairs[0].clone(), mutable_opts.decompress);
-                    let rx2 = spawn_reader(file_pairs[1].clone(), mutable_opts.decompress);
+                    let rx1 = spawn_reader(file_pairs[0].clone(), opts.decompress);
+                    let rx2 = spawn_reader(file_pairs[1].clone(), opts.decompress);
                     for (reads1, reads2) in izip!(rx1.iter(), rx2.iter()) {
                         let paired_reads = reads1.into_iter().zip(reads2.into_iter()).collect_vec();
                         process_paired_reads(paired_reads, &matcher, &writer, &progress_logger);
@@ -464,7 +464,7 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
             // Process one FASTQ at a time
             for file in files {
                 // The channel FASTQ record chunks are received after being read in
-                let rx = spawn_reader(file.clone(), mutable_opts.decompress);
+                let rx = spawn_reader(file.clone(), opts.decompress);
                 for reads in rx.iter() {
                     // Get the matched reads
                     let matched_reads: Vec<OwnedRecord> = reads
@@ -736,7 +736,6 @@ pub mod tests {
     #[case(true, vec![String::from("GGCC"), String::from("G..C")], 1)] // paired: mixed set with one match
     #[case(true, vec![String::from("Z"), String::from("A.....G")], 0)] // paired: mixed set with zero matches
     #[case(true, vec![String::from("^T"), String::from("AA")], 3)] // paired: mixed set with multiple matches
-
     fn test_reads_when_count_true(
         #[case] paired: bool,
         #[case] pattern: Vec<String>,
@@ -774,7 +773,6 @@ pub mod tests {
     #[case(true, vec![String::from("^A"), String::from("A$")], vec!["AAAA", "CCCC"], true)] // paired: regex with one match
     #[case(true, vec![String::from("^A"), String::from("^G")], vec!("AAAA", "CCCC", "TTTT", "GGGG"), true)] // paired: regex set with two matches in correct interleave order
     #[case(true, vec![String::from("^A"), String::from("^G")], vec!("AAAA", "GGGG", "TTTT", "CCCC"), false)] // paired: regex set with two matches in incorrect interleave order
-
     fn test_reads_when_count_false(
         #[case] paired: bool,
         #[case] pattern: Vec<String>,
@@ -818,7 +816,6 @@ pub mod tests {
     #[case(true, false, true, 1)] //  paired: one match when invert_match is false and reverse_complement is true
     #[case(true, true, false, 2)] //  paired: two matches when invert_match is true and reverse_complement is false
     #[case(true, true, true, 2)] // paired: two matches when invert_match and reverse_complement are true
-
     fn test_reverse_complement_and_invert_match(
         #[case] paired: bool,
         #[case] invert_match: bool,
@@ -921,7 +918,6 @@ pub mod tests {
     #[case(String::from(".fastq"), 3)]
     #[case(String::from(".fq.gz"), 3)]
     #[case(String::from(".fq.bgz"), 3)]
-
     fn test_fastq_compression(#[case] extension: String, #[case] expected: usize) {
         let dir = TempDir::new().unwrap();
         let seqs = vec![
@@ -946,7 +942,6 @@ pub mod tests {
     #[case(false, vec![String::from("^T")], Some(1))] // zero matches - ExitCode(1)
     #[case(true, vec![String::from("GTCAGC")], None)] // one match - ExitCode(SUCCESS) None returned from fqgrep()
     #[case(true, vec![String::from("^T")], Some(2))] // returns inner error when regex is declared fixed_string - ExitCode(2)
-
     fn test_exit_code_catching(
         #[case] fixed_strings: bool,
         #[case] pattern: Vec<String>,
