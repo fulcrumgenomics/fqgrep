@@ -332,20 +332,19 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
 
     // Inspect the positional arguments to extract a fixed pattern
     let (pattern, mut files): (Option<String>, Vec<PathBuf>) = {
-        let (pattern, file_strings): (Option<String>, Vec<String>) =
-            if opts.regexp.is_empty() {
-                // No patterns given by -e, so assume the first positional argument is the pattern and
-                // the rest are files
-                ensure!(
-                    !opts.args.is_empty(),
-                    "Pattern must be given with -e or as the first positional argument "
-                );
-                let files = opts.args.iter().skip(1).cloned().collect();
-                (Some(opts.args[0].clone()), files)
-            } else {
-                // Patterns given by -e, so assume all positional arguments are files
-                (None, opts.args.clone())
-            };
+        let (pattern, file_strings): (Option<String>, Vec<String>) = if opts.regexp.is_empty() {
+            // No patterns given by -e, so assume the first positional argument is the pattern and
+            // the rest are files
+            ensure!(
+                !opts.args.is_empty(),
+                "Pattern must be given with -e or as the first positional argument "
+            );
+            let files = opts.args.iter().skip(1).cloned().collect();
+            (Some(opts.args[0].clone()), files)
+        } else {
+            // Patterns given by -e, so assume all positional arguments are files
+            (None, opts.args.clone())
+        };
 
         // Convert file strings into paths
         let files = file_strings
@@ -399,17 +398,12 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
     let match_opts = MatcherOpts {
         invert_match: opts.invert_match,
         reverse_complement: opts.reverse_complement,
-        color: opts.color == Color::Always
-            || (opts.color == Color::Auto && stdout_isatty()),
+        color: opts.color == Color::Always || (opts.color == Color::Auto && stdout_isatty()),
     };
 
     // The matcher used in the primary search
-    let matcher: Box<dyn Matcher + Sync + Send> = MatcherFactory::new_matcher(
-        &pattern,
-        opts.fixed_strings,
-        &opts.regexp,
-        match_opts,
-    );
+    let matcher: Box<dyn Matcher + Sync + Send> =
+        MatcherFactory::new_matcher(&pattern, opts.fixed_strings, &opts.regexp, match_opts);
 
     // The thread pool from which threads are spanwed.
     let pool = rayon::ThreadPoolBuilder::new()
@@ -421,12 +415,7 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
     let (count_tx, count_rx): (Sender<usize>, Receiver<usize>) = bounded(1);
 
     // The writer of final counts or matching records
-    let writer = FastqWriter::new(
-        count_tx,
-        opts.count,
-        opts.paired,
-        opts.output.clone(),
-    );
+    let writer = FastqWriter::new(count_tx, opts.count, opts.paired, opts.output.clone());
 
     // The main loop
     pool.install(|| {
