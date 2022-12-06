@@ -77,36 +77,21 @@ pub fn is_fastq_path<P: AsRef<Path>>(p: &P) -> bool {
 pub mod tests {
     use crate::*;
     use rstest::rstest;
-    use seq_io::fastq::OwnedRecord;
     use std::str;
     use tempfile::TempDir;
-
-    /// Helper function takes a sequence and returns a seq_io::fastq::OwnedRecord
-    ///
-    fn write_owned_record(seq: &str) -> OwnedRecord {
-        let read = OwnedRecord {
-            head: ("@Sample").as_bytes().to_vec(),
-            seq: seq.as_bytes().to_vec(),
-            qual: vec![b'X'; seq.len()],
-        };
-        read
-    }
 
     // ############################################################################################
     // Tests reverse_complement()
     // ############################################################################################
 
     #[test]
-    fn test_reverse_complement() {
-        let read = write_owned_record("ACTG");
-        let result = reverse_complement(read.seq);
+    #[rstest]
+    #[case("ACGT", "ACGT")] // Reverse complement with even length string
+    #[case("ACG", "CGT")] // Reverse complement with odd length string (tests for off by one error)
+    fn test_reverse_complement(#[case] seq: &str, #[case] expected: &str) {
+        let result = reverse_complement(seq.as_bytes());
         let string_result = str::from_utf8(&result).unwrap();
-
-        // Correct
-        assert_eq!(&string_result, &"CAGT");
-
-        // Incorrect
-        assert_ne!(&string_result, &"TGAC");
+        assert_eq!(&string_result, &expected);
     }
 
     // ############################################################################################
