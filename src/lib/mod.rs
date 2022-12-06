@@ -84,7 +84,6 @@ pub mod tests {
     // Tests reverse_complement()
     // ############################################################################################
 
-    #[test]
     #[rstest]
     #[case("ACGT", "ACGT")] // Reverse complement with even length string
     #[case("ACG", "CGT")] // Reverse complement with odd length string (tests for off by one error)
