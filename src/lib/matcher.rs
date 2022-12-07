@@ -544,6 +544,7 @@ pub mod tests {
         let result = validate_fixed_pattern(&pattern);
         assert!(result.is_ok())
     }
+
     #[test]
     fn test_validate_fixed_pattern_error() {
         let pattern = "A.GTGTGATG";
