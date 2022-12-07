@@ -511,7 +511,6 @@ pub mod tests {
     #[case(vec!["^A.G", "C..", "$T"], "TTTTTC".as_bytes(), bitvec![0, 0, 0, 0, 0, 0])] // regex set with multiple patterns and no matches
     #[case(vec!["^T", ".GG", "A.+G"], "ATCTACTACG".as_bytes(), bitvec![1, 1, 1, 1, 1, 1, 1, 1, 1, 1])] // regex set where 1/3 patterns have matches
     #[case(vec!["CT.", ".CT"], "CTACT".as_bytes(), bitvec![1, 1, 1, 1, 1])] // regex set with overlapping matches
-
     fn test_regex_set_bitvec(
         #[case] patterns: Vec<&str>,
         #[case] bases: &[u8],
@@ -547,8 +546,8 @@ pub mod tests {
 
     #[test]
     fn test_validate_fixed_pattern_error() {
-        let pattern = "A.GTGTGATG";
-        let msg = String::from("Fixed pattern must contain only DNA bases: A .. [.] .. GTGTGATG");
+        let pattern = "AXGTGTGATG";
+        let msg = String::from("Fixed pattern must contain only DNA bases: A .. [X] .. GTGTGATG");
         let result = validate_fixed_pattern(&pattern);
         let inner = result.unwrap_err().to_string();
         assert_eq!(inner, msg);
