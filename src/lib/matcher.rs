@@ -292,7 +292,7 @@ impl RegexMatcher {
         let regex = RegexBuilder::new(pattern)
             .build()
             .context(format!("Invalid regular expression: {}", pattern))
-            .unwrap(); 
+            .unwrap();
         Self { regex, opts }
     }
 }
@@ -412,9 +412,7 @@ impl MatcherFactory {
 #[cfg(test)]
 pub mod tests {
     use crate::matcher::*;
-    use bstr::ByteSlice;
     use rstest::rstest;
-    use std::ops::Range;
 
     /// Helper function takes a sequence and returns a seq_io::fastq::OwnedRecord
     ///
@@ -426,9 +424,11 @@ pub mod tests {
         };
         read
     }
+
     // ############################################################################################
-    // Test to_bitvec()
+    // Tests to_bitvec()
     // ############################################################################################
+
     #[rstest]
     #[case(vec![(0, 1)], "AGG",  bitvec![1, 0, 0])] // single range that starts at the beginning of the read
     #[case(vec![(2, 3)], "AGG", bitvec![0, 0, 1])] // single range that ends at the ends of the read
@@ -454,117 +454,173 @@ pub mod tests {
     }
 
     // ############################################################################################
-    // Tests to_bitvec() fixed string set
+    // Test FixedStringMatcher::read_match()
     // ############################################################################################
+
     #[rstest]
-    #[case(vec![("A".as_bytes().to_vec())], "AGG".as_bytes(), bitvec![1, 0, 0])] // fixed pattern set with one pattern and one match
-    #[case(vec![("A".as_bytes().to_vec())], "CGG".as_bytes(), bitvec![0, 0, 0])] // fixed pattern set with one pattern and no matches
-    #[case(vec![("AGG".as_bytes().to_vec()), ("C".as_bytes().to_vec()), ("TT".as_bytes().to_vec())], "AGGCTT".as_bytes(), bitvec![1, 1, 1, 1, 1, 1])] // fixed pattern set with multiple patterns that all match
-    #[case(vec![("AGG".as_bytes().to_vec()), ("C".as_bytes().to_vec()), ("TT".as_bytes().to_vec())], "GGGGG".as_bytes(), bitvec![0, 0, 0, 0, 0])] // fixed pattern set with multiple patterns and no matches
-    #[case(vec![("AGG".as_bytes().to_vec()), ("C".as_bytes().to_vec()), ("TT".as_bytes().to_vec())], "AGG".as_bytes(), bitvec![1, 1, 1])] // fixed pattern set where 1/3 patterns have matches
-    #[case(vec![("AG".as_bytes().to_vec()), ("C".as_bytes().to_vec()), ("TT".as_bytes().to_vec())], "AGACGTT".as_bytes(), bitvec![1, 1, 0, 1, 0, 1, 1])] // fixed pattern set with multiple matches
-    #[case(vec![("GAGA".as_bytes().to_vec()),("AGTT".as_bytes().to_vec())], "GAGAGTT".as_bytes(), bitvec![1, 1, 1, 1, 1, 1, 1])] // fixed pattern set with overlapping matches
-    fn test_to_bitvec_fixed_string_set(
-        #[case] patterns: Vec<Vec<u8>>,
-        #[case] bases: &[u8],
-        #[case] expected: BitVec,
+    #[case(false, "AG", "AGG", true)] // fixed string with match when reverse_complement is false
+    #[case(false, "CC", "AGG", false)] // fixed string with no match when reverse_complement is false
+    #[case(true, "CC", "AGG", true)] // fixed string with match when reverse_complement is true
+    #[case(true, "TT", "AGG", false)] // fixed string with no match when reverse_complement is true
+    #[case(false, "AT", "ATGAT", true)] // fixed string with multiple non-overlapping matches when reverse_complement is false
+    #[case(true, "CG", "GCCG", true)] // fixed string with multiple non-overlapping matches when reverse_complement is true
+    #[case(false, "AGAG", "AGAGAGAG", true)] // fixed string with overlapping matches when reverse_complemet is false
+    #[case(true, "TCTC", "AGAGAGAG", true)] // fixed string with overlapping matches when reverse_complemet is true
+    fn test_fixed_string_matcher_read_match(
+        #[case] reverse_complement: bool,
+        #[case] pattern: &str,
+        #[case] seq: &str,
+        #[case] expected: bool,
     ) {
-        let opts = MatcherOpts {
-            invert_match: false,
-            reverse_complement: false,
-            color: false,
-        };
-
-        let matcher = FixedStringSetMatcher {
-            patterns: patterns,
-            opts: opts,
-        };
-
-        let ranges = matcher.patterns.iter().flat_map(|pattern| {
-            bases
-                .find_iter(&pattern)
-                .map(|start| Range {
-                    start,
-                    end: start + pattern.len(),
-                })
-                .collect::<Vec<_>>()
-        });
-
-        let result_bitvec = to_bitvec(ranges.into_iter(), bases.len());
-        assert_eq!(result_bitvec, expected);
+        let invert_matches = [true, false];
+        for invert_match in IntoIterator::into_iter(invert_matches).to_owned() {
+            let opts = MatcherOpts {
+                invert_match,
+                reverse_complement,
+                color: false,
+            };
+            let matcher = FixedStringMatcher::new(pattern, opts);
+            let mut read_record = write_owned_record(seq);
+            let result = matcher.read_match(&mut read_record);
+            if invert_match {
+                assert_ne!(result, expected);
+            } else {
+                assert_eq!(result, expected);
+            }
+        }
     }
 
     // ############################################################################################
-    // Tests to_bitvec() regex
+    // Tests FixedStringSetMatcher::read_match()
     // ############################################################################################
-    #[rstest]
-    #[case("^A", "AGG".as_bytes(), bitvec![1, 0, 0])] // regex with one match
-    #[case("^T", "AGG".as_bytes(), bitvec![0, 0, 0])] // regex with no matches
-    #[case("A.T", "ATTTGGGATT".as_bytes(), bitvec![1, 1, 1, 0, 0, 0, 0, 1, 1, 1])] // regex with multiple non overlapping matches
-    #[case("A.A", "ATATA".as_bytes(), bitvec![1, 1, 1, 0, 0])] // regex with overlapping matches
-    fn test_regex_bitvec(#[case] pattern: &str, #[case] bases: &[u8], #[case] expected: BitVec) {
-        let opts = MatcherOpts {
-            invert_match: false,
-            reverse_complement: false,
-            color: false,
-        };
-        let matcher = RegexMatcher::new(&pattern, opts);
-        let ranges = matcher.regex.find_iter(bases).map(|m| m.range());
-        let result_bitvec = to_bitvec(ranges, bases.len());
-        println!("{:?}", &result_bitvec);
-        assert_eq!(result_bitvec, expected);
-    }
 
-    // ############################################################################################
-    // Tests to_bitvec() regex set
-    // ############################################################################################
     #[rstest]
-    #[case(vec!["^A"], "AGG".as_bytes(), bitvec![1, 0, 0])] // regex set with one pattern and one match
-    #[case(vec!["^A"], "CGG".as_bytes(), bitvec![0, 0, 0])] // regex set with one pattern and no matches
-    #[case(vec!["^A.G", "C..", "$T"], "AGGCTT".as_bytes(), bitvec![1, 1, 1, 1, 1, 1])] // regex set with multiple patterns that all match
-    #[case(vec!["^A.G", "C..", "$T"], "TTTTTC".as_bytes(), bitvec![0, 0, 0, 0, 0, 0])] // regex set with multiple patterns and no matches
-    #[case(vec!["^T", ".GG", "A.+G"], "ATCTACTACG".as_bytes(), bitvec![1, 1, 1, 1, 1, 1, 1, 1, 1, 1])] // regex set where 1/3 patterns have matches
-    #[case(vec!["CT.", ".CT"], "CTACT".as_bytes(), bitvec![1, 1, 1, 1, 1])] // regex set with overlapping matches
-    fn test_regex_set_bitvec(
+    #[case(false, vec!["A", "AGG", "G"], "AGGG", true)] // match is true when reverse_complement is false
+    #[case(true, vec!["A", "AGG", "G"], "TCCC", true)] // match is true when reverse_complement is true
+    #[case(false, vec!["A", "AGG", "G"], "TTTT", false)] // match is false when reverse_complement is false
+    #[case(true, vec!["T", "AAA"], "CCCCC", false)] // match is false when reverse_complement is true
+    #[case(false, vec!["AGG", "C", "TT"], "AGGTT",  true)] // match is true but not all patterns match when reverse_complement is false
+    #[case(true, vec!["AGG", "C", "TT"], "GGGGG",  true)] // match is true but not all patterns match when reverse_complement is true
+    #[case(false, vec!["AC", "TT"], "TTACGTT",  true)] // match is true but one pattern matches multiple times when reverse_complement is false
+    #[case(true, vec!["GT", "AA"], "TTACGTT",  true)] // match is true but one pattern matches multiple times when reverse_complement is true
+    #[case(false, vec!["GAGA","AGTT"], "GAGAGTT",  true)] // match is true with overlapping matches when reverse_complment is false
+    #[case(true, vec!["CTCT","AACT"], "GAGAGTT",  true)] // match is true with overlapping matches when reverse_complment is true
+    fn test_fixed_string_set_metcher_read_match(
+        #[case] reverse_complement: bool,
         #[case] patterns: Vec<&str>,
-        #[case] bases: &[u8],
-        #[case] expected: BitVec,
+        #[case] seq: &str,
+        #[case] expected: bool,
     ) {
-        let opts = MatcherOpts {
-            invert_match: false,
-            reverse_complement: false,
-            color: false,
-        };
-
-        let matcher = RegexSetMatcher::new(&patterns, opts);
-
-        let ranges = matcher
-            .regex_matchers
-            .iter()
-            .flat_map(|r| r.regex.find_iter(bases).map(|m| m.range()));
-
-        let result_bitvec = to_bitvec(ranges, bases.len());
-
-        assert_eq!(result_bitvec, expected);
+        let invert_matches = [true, false];
+        for invert_match in IntoIterator::into_iter(invert_matches).to_owned() {
+            let opts = MatcherOpts {
+                invert_match,
+                reverse_complement,
+                color: false,
+            };
+            let matcher = FixedStringSetMatcher::new(patterns.iter(), opts);
+            let mut read_record = write_owned_record(seq);
+            let result = matcher.read_match(&mut read_record);
+            if invert_match {
+                assert_ne!(result, expected);
+            } else {
+                assert_eq!(result, expected);
+            }
+        }
     }
 
     // ############################################################################################
-    // Tests validate_fixed_pattern
+    // Test RegexMatcher::read_match()
     // ############################################################################################
+
+    #[rstest]
+    #[case(false, "^A", "AGG", true)] // regex with one match when reverse_complement is false
+    #[case(false, "^T", "AGG", false)] // regex with no matches when reverse_complement is false
+    #[case(true, "^C", "AGG", true)] // regex with one match when reverse_complement is true
+    #[case(true, "^T", "AGG", false)] // regex with no matches when reverse_complement is true
+    #[case(false, "A.A", "ATATA", true)] // regex with overlapping matches when reverse_complement is false
+    #[case(true, "T.G", "CACACA", false)] // regex with overlapping matches when reverse_complement is true
+    fn test_regex_matcher_read_match(
+        #[case] reverse_complement: bool,
+        #[case] pattern: &str,
+        #[case] seq: &str,
+        #[case] expected: bool,
+    ) {
+        let invert_matches = [true, false];
+        for invert_match in IntoIterator::into_iter(invert_matches).to_owned() {
+            let opts = MatcherOpts {
+                invert_match,
+                reverse_complement,
+                color: false,
+            };
+
+            let matcher = RegexMatcher::new(&pattern, opts);
+            let mut read_record = write_owned_record(seq);
+            let result = matcher.read_match(&mut read_record);
+            if invert_match {
+                assert_ne!(result, expected);
+            } else {
+                assert_eq!(result, expected);
+            }
+        }
+    }
+
+    // ############################################################################################
+    // Tests RegexSetMatcher::read_match()
+    // ############################################################################################
+
+    #[rstest]
+    #[case(false, vec!["^A.G", "C..", "$T"], "AGGCTT", true)] // match is true when reverse_complement is false
+    #[case(true, vec!["^T.C", "..G", "$A"], "AGGCTT", true)] // match is true when reverse_complement is true
+    #[case(false, vec!["^A.G", "G..", "$T"], "CCTCA", false)] // match is false when reverse_complemet is false
+    #[case(true, vec!["$A", "C.CC"], "CCTCA", false)] // match is false when reverse_complemet is true
+    #[case(false, vec!["^T", ".GG", "A.+G"],  "ATCTACTACG",  true)] // match is true but not all patterns match when reverse_complement is false
+    #[case(true, vec!["^C", ".CC", "C+.T"],  "ATCTACTACG",  true)] // match is true when reverse_complement is true
+    #[case(false, vec!["^T", "T.A"], "TTAATAA", true)] // match is true but one pattern matches multiple times when reverse_complement is false
+    #[case(true, vec!["^T", "T.A"], "AATA", true)] // match is true but one pattern matches multiple times when reverse_complemetn is true
+    #[case(false, vec!["^T","T.+G"], "TAGAGTG",  true)] // match is true with overlapping matches when reverse_complement is false
+    #[case(true, vec!["^A","A.+C"], "TAGAGTG",  true)] // match is true with overlapping matches when reverse_complement is true
+    fn test_regex_set_metcher_read_match(
+        #[case] reverse_complement: bool,
+        #[case] patterns: Vec<&str>,
+        #[case] seq: &str,
+        #[case] expected: bool,
+    ) {
+        let invert_matches = [true, false];
+        for invert_match in IntoIterator::into_iter(invert_matches).to_owned() {
+            let opts = MatcherOpts {
+                invert_match,
+                reverse_complement,
+                color: false,
+            };
+
+            let matcher = RegexSetMatcher::new(patterns.iter(), opts);
+            let mut read_record = write_owned_record(seq);
+            let result = matcher.read_match(&mut read_record);
+            if invert_match {
+                assert_ne!(result, expected);
+            } else {
+                assert_eq!(result, expected);
+            }
+        }
+    }
+
+    // ############################################################################################
+    // Tests validate_fixed_pattern()
+    // ############################################################################################
+
     #[test]
     fn test_validate_fixed_pattern_is_ok() {
         let pattern = "AGTGTGATG";
         let result = validate_fixed_pattern(&pattern);
         assert!(result.is_ok())
     }
-
     #[test]
     fn test_validate_fixed_pattern_error() {
-        let pattern = "AXGTGTGATG";
-        let msg = String::from("Fixed pattern must contain only DNA bases: A .. [X] .. GTGTGATG");
+        let pattern = "A.GTGTGATG";
+        let msg = String::from("Fixed pattern must contain only DNA bases: A .. [.] .. GTGTGATG");
         let result = validate_fixed_pattern(&pattern);
         let inner = result.unwrap_err().to_string();
         assert_eq!(inner, msg);
     }
-
 }

@@ -702,32 +702,32 @@ pub mod tests {
     // ############################################################################################
     #[rstest]
     // Unpaired reads with fixed strings
-    #[case(false, vec![String::from("AA")], 1)] // unpaired: fixed string with one match
-    #[case(false, vec![String::from("CCCG")], 0)] // unpaired: fixed string with zero matches
-    #[case(false, vec![String::from("T")], 3)] // unpaired: fixed string with multiple matches
+    #[case(false, vec!["AA"], 1)] // unpaired: fixed string with one match
+    #[case(false, vec!["CCCG"], 0)] // unpaired: fixed string with zero matches
+    #[case(false, vec!["T"], 3)] // unpaired: fixed string with multiple matches
     // Unpaired reads with regex
-    #[case(false, vec![String::from("^A")], 1)] // unpaired: regex with one match
-    #[case(false, vec![String::from("T.....G")], 0)] // unpaired: regex with zero matches
-    #[case(false, vec![String::from("G")], 4)] // unpaired: regex with multiple matches
+    #[case(false, vec!["^A"], 1)] // unpaired: regex with one match
+    #[case(false, vec!["T.....G"], 0)] // unpaired: regex with zero matches
+    #[case(false, vec!["G"], 4)] // unpaired: regex with multiple matches
     // Unpaired reads with mixed patterns
-    #[case(false, vec![String::from("GGCC"), String::from("G..C")], 1)] // unpaired: mixed set with one match
-    #[case(false, vec![String::from("Z"), String::from("A.....G")], 0)] // unpaired: mixed set with zero matches
-    #[case(false, vec![String::from("^T"), String::from("AA")], 3)] // unpaired: mixed set with multiple matches
+    #[case(false, vec!["GGCC", "G..C"], 1)] // unpaired: mixed set with one match
+    #[case(false, vec!["Z", "A.....G"], 0)] // unpaired: mixed set with zero matches
+    #[case(false,vec!["^T", "AA"], 3)] // unpaired: mixed set with multiple matches
     // Paired reads with fixed strings
-    #[case(true, vec![String::from("AA")], 1)] // paired: fixed string with one match
-    #[case(true, vec![String::from("CCCG")], 0)] // paired: fixed string with zero matches
-    #[case(true, vec![String::from("CC")], 2)] // paired: fixed string with multiple matches
+    #[case(true, vec!["AA"], 1)] // paired: fixed string with one match
+    #[case(true, vec!["CCCG"], 0)] // paired: fixed string with zero matches
+    #[case(true, vec!["CC"], 2)] // paired: fixed string with multiple matches
     // Paired reads with regex
-    #[case(true, vec![String::from("^A")], 1)] // paired: regex with one match
-    #[case(true, vec![String::from("T.....G")], 0)] // paired: regex with zero matches
-    #[case(true, vec![String::from("G")], 3)] // paired: regex with multiple matches
+    #[case(true, vec!["^A"], 1)] // paired: regex with one match
+    #[case(true, vec!["T.....G"], 0)] // paired: regex with zero matches
+    #[case(true, vec!["G"], 3)] // paired: regex with multiple matches
     // Paired reads with mixed patterns
-    #[case(true, vec![String::from("GGCC"), String::from("G..C")], 1)] // paired: mixed set with one match
-    #[case(true, vec![String::from("Z"), String::from("A.....G")], 0)] // paired: mixed set with zero matches
-    #[case(true, vec![String::from("^T"), String::from("AA")], 3)] // paired: mixed set with multiple matches
+    #[case(true, vec!["GGCC", "G..C"], 1)] // paired: mixed set with one match
+    #[case(true, vec!["Z", "A.....G"], 0)] // paired: mixed set with zero matches
+    #[case(true, vec!["^T", "AA"], 3)] // paired: mixed set with multiple matches
     fn test_reads_when_count_true(
         #[case] paired: bool,
-        #[case] pattern: Vec<String>,
+        #[case] pattern: Vec<&str>,
         #[case] expected: usize,
     ) {
         let dir = TempDir::new().unwrap();
@@ -737,6 +737,7 @@ pub mod tests {
             vec!["TTCT", "CGCG"],
             vec!["GGTT", "GGCC"],
         ];
+        let pattern = pattern.iter().map(|&s| s.to_owned()).collect::<Vec<_>>();
         let mut opts = build_opts(&dir, &seqs, &pattern, true, None, String::from(".fq"));
         opts.paired = paired;
         let result = fqgrep_from_opts(&opts);
@@ -748,23 +749,23 @@ pub mod tests {
     // ############################################################################################
     #[rstest]
     // Unpaired reads with fixed strings
-    #[case(false, vec![String::from("A")], vec!["AAAA"], true)] // unpaired: fixed string with one match
-    #[case(false, vec![String::from("A"), String::from("G")], vec!("AAAA", "GGGG"), true)] // unpaired: fixed string set with two matches
+    #[case(false, vec!["A"], vec!["AAAA"], true)] // unpaired: fixed string with one match
+    #[case(false, vec!["A", "G"], vec!("AAAA", "GGGG"), true)] // unpaired: fixed string set with two matches
     // Unpaired reads with regex
-    #[case(false, vec![String::from("^A")], vec!["AAAA"], true)] // unpaired: regex with one match
-    #[case(false, vec![String::from("^A"), String::from("^G")], vec!("AAAA", "GGGG"), true)] // unpaired: regex set with two matches
+    #[case(false, vec!["^A"], vec!["AAAA"], true)] // unpaired: regex with one match
+    #[case(false, vec!["^A", "^G"], vec!("AAAA", "GGGG"), true)] // unpaired: regex set with two matches
     // Paired reads with fixed string sets
-    #[case(true, vec![String::from("A"), String::from("AAAA")], vec!["AAAA", "CCCC"], true)] // paired: fixed string with one match
-    #[case(true, vec![String::from("A"), String::from("G")], vec!("AAAA", "CCCC", "TTTT", "GGGG"), true)] // paired: fixed string set with two matches in correct interleave order
-    #[case(true, vec![String::from("A"), String::from("G")], vec!("AAAA", "GGGG", "TTTT", "CCCC"), false)]
+    #[case(true, vec!["A", "AAAA"], vec!["AAAA", "CCCC"], true)] // paired: fixed string with one match
+    #[case(true, vec!["A", "G"], vec!("AAAA", "CCCC", "TTTT", "GGGG"), true)] // paired: fixed string set with two matches in correct interleave order
+    #[case(true, vec!["A", "G"], vec!("AAAA", "GGGG", "TTTT", "CCCC"), false)]
     // paired: fixed string set with two matches in incorrect interleave order
     // Paired reads with regex sets
-    #[case(true, vec![String::from("^A"), String::from("A$")], vec!["AAAA", "CCCC"], true)] // paired: regex with one match
-    #[case(true, vec![String::from("^A"), String::from("^G")], vec!("AAAA", "CCCC", "TTTT", "GGGG"), true)] // paired: regex set with two matches in correct interleave order
-    #[case(true, vec![String::from("^A"), String::from("^G")], vec!("AAAA", "GGGG", "TTTT", "CCCC"), false)] // paired: regex set with two matches in incorrect interleave order
+    #[case(true, vec!["^A", "A$"], vec!["AAAA", "CCCC"], true)] // paired: regex with one match
+    #[case(true, vec!["^A", "^G"], vec!("AAAA", "CCCC", "TTTT", "GGGG"), true)] // paired: regex set with two matches in correct interleave order
+    #[case(true, vec!["^A", "^G"], vec!("AAAA", "GGGG", "TTTT", "CCCC"), false)] // paired: regex set with two matches in incorrect interleave order
     fn test_reads_when_count_false(
         #[case] paired: bool,
-        #[case] pattern: Vec<String>,
+        #[case] pattern: Vec<&str>,
         #[case] expected_seq: Vec<&str>,
         #[case] expected_bool: bool,
     ) {
@@ -772,6 +773,7 @@ pub mod tests {
         let seqs = vec![vec!["AAAA", "TTTT"], vec!["CCCC", "GGGG"]];
         let out_path = dir.path().join(String::from("output.fq"));
         let result_path = &out_path.clone();
+        let pattern = pattern.iter().map(|&s| s.to_owned()).collect::<Vec<_>>();
         let mut opts = build_opts(
             &dir,
             &seqs,
