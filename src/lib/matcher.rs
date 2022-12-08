@@ -45,7 +45,6 @@ fn bases_colored(
     let mut colored_quals = Vec::with_capacity(bases.len());
 
     // Merge the ranges into a bit mask, with 1 indicating that base is part of a pattern match
-    println!("{:?}", &bases.len());
     let bits = to_bitvec(ranges, bases.len());
 
     // Iterate over the bit mask, finding stretches of matching and non-matching bases.  Color both
@@ -293,7 +292,7 @@ impl RegexMatcher {
         let regex = RegexBuilder::new(pattern)
             .build()
             .context(format!("Invalid regular expression: {}", pattern))
-            .unwrap(); // regex parse error will panic if unwrap on error...
+            .unwrap(); 
         Self { regex, opts }
     }
 }
@@ -417,24 +416,39 @@ pub mod tests {
     use rstest::rstest;
     use std::ops::Range;
 
+    /// Helper function takes a sequence and returns a seq_io::fastq::OwnedRecord
+    ///
+    fn write_owned_record(seq: &str) -> OwnedRecord {
+        let read = OwnedRecord {
+            head: ("@Sample").as_bytes().to_vec(),
+            seq: seq.as_bytes().to_vec(),
+            qual: vec![b'X'; seq.len()],
+        };
+        read
+    }
     // ############################################################################################
-    // Tests to_bitvec() fixed string
+    // Test to_bitvec()
     // ############################################################################################
     #[rstest]
-    #[case("AG".as_bytes(), "AGG".as_bytes(), bitvec![1, 1, 0])] // fixed string with match
-    #[case("AT".as_bytes(), "CCC".as_bytes(), bitvec![0, 0, 0])] // fixed string with no match
-    #[case("AT".as_bytes(), "ATGAT".as_bytes(), bitvec![1, 1, 0, 1, 1])] // fixed string with multiple non-overlapping matches
-    #[case("AGAG".as_bytes(), "AGAGAGAG".as_bytes(), bitvec![1, 1, 1, 1, 1, 1, 1, 1])] // fixed string with overlapping matches
-    fn test_to_bitvec_fixed_string(
-        #[case] pattern: &[u8],
-        #[case] bases: &[u8],
+    #[case(vec![(0, 1)], "AGG",  bitvec![1, 0, 0])] // single range that starts at the beginning of the read
+    #[case(vec![(2, 3)], "AGG", bitvec![0, 0, 1])] // single range that ends at the ends of the read
+    #[case(vec![(1, 2)], "AGG", bitvec![0, 1, 0])] // single range of a single base
+    #[case(vec![(0 ,0)], "AGG", bitvec![0, 0, 0])] // empty set of ranges
+    #[case(vec![(0, 3)], "AGG", bitvec![1, 1, 1])] // single range that encompasses the full read
+    #[case(vec![(1, 4)], "AGGTC", bitvec![0, 1, 1, 1, 0])] // single range in the "middle" of the read
+    #[case(vec![(0, 2), (3, 5)], "AGGTC", bitvec![1, 1, 0, 1, 1])] // two ranges non-overlapping
+    #[case(vec![(0, 3), (3, 5)], "AGGTC", bitvec![1, 1, 1, 1, 1])] // two ranges abutting
+    #[case(vec![(0, 4), (3, 5)], "AGGTC", bitvec![1, 1, 1, 1, 1])] // two ranges overlapping
+    #[case(vec![(0, 3), (0, 5)], "AGGTC", bitvec![1, 1, 1, 1, 1])] // two ranges, one containing the other
+    #[case(vec![(4, 5), (0, 2)], "AGGTC", bitvec![1, 1, 0, 0, 1])] // multiple ranges, but not in sorted order
+    fn test_to_bitvec(
+        #[case] ranges: Vec<(usize, usize)>,
+        #[case] bases: &str,
         #[case] expected: BitVec,
     ) {
-        let ranges = bases.as_bytes().find_iter(&pattern).map(|start| Range {
-            start,
-            end: start + &pattern.len(),
-        });
-
+        let ranges = ranges
+            .into_iter()
+            .map(|(start, end)| std::ops::Range { start, end });
         let result_bitvec = to_bitvec(ranges, bases.len());
         assert_eq!(result_bitvec, expected);
     }
@@ -553,107 +567,4 @@ pub mod tests {
         assert_eq!(inner, msg);
     }
 
-    // ############################################################################################
-    // Tests FixedStringMatcher::bases_match()
-    // ############################################################################################
-    #[rstest]
-    #[case(false, "GG", "AGGT", true)] // fixed pattern is found in bases, and invert_match is false
-    #[case(true, "GG", "AGGT", false)] // fixed pattern is found in bases, and invert_matches is true
-    #[case(true, "GG", "CCC", true)] // fixed pattern is not found in bases, and invert_match is true
-    #[case(false, "GG", "CCC", false)] // fixed pattern is bot found in bases, and invert_match is false
-    fn test_matcher_fixed_string_matcher_bases_match(
-        #[case] invert_match: bool,
-        #[case] pattern: &str,
-        #[case] bases: String,
-        #[case] expected: bool,
-    ) {
-        let opts = MatcherOpts {
-            invert_match,
-            reverse_complement: false, // does not impact FixedStringMatcher::bases_match()
-            color: false,
-        };
-
-        let matcher = FixedStringMatcher::new(pattern, opts);
-        assert_eq!(matcher.bases_match(bases.as_bytes()), expected);
-    }
-    // ############################################################################################
-    // Tests FixedStringSetMatcher::bases_match()
-    // ############################################################################################
-    #[rstest]
-    #[case(false, vec![("AGT".as_bytes().to_vec()), ("GG".as_bytes().to_vec())], "AGTGG", true)] // all patterns are found in bases, and invert_match is false
-    #[case(true, vec![("AGT".as_bytes().to_vec()), ("GG".as_bytes().to_vec())], "AGTGG", false)] // all patterns are found in bases, and invert_matches is true
-    #[case(false, vec![("AGT".as_bytes().to_vec()), ("TT".as_bytes().to_vec())], "AGTGG", true)] // some patterns are found in bases, and invert_matches is false
-    #[case(true, vec![("AGT".as_bytes().to_vec()), ("TT".as_bytes().to_vec())], "AGTGG", false)] // some patterns are found in bases, and invert_matches is true
-    #[case(false, vec![("CCC".as_bytes().to_vec()), ("TT".as_bytes().to_vec())], "AGTGG", false)] // no patterns are found in bases, and invert_matches is false
-    #[case(true, vec![("CCC".as_bytes().to_vec()), ("TT".as_bytes().to_vec())], "AGTGG", true)] // no patterns are found in bases, and invert_matches is true
-
-    fn test_matcher_fixed_string_set_matcher_bases_match(
-        #[case] invert_match: bool,
-        #[case] patterns: Vec<Vec<u8>>,
-        #[case] bases: String,
-        #[case] expected: bool,
-    ) {
-        let opts = MatcherOpts {
-            invert_match,
-            reverse_complement: false, // does not impact FixedStringSetMatcher::bases_match()
-            color: false,
-        };
-
-        let matcher = FixedStringSetMatcher {
-            patterns: patterns,
-            opts: opts,
-        };
-
-        assert_eq!(matcher.bases_match(bases.as_bytes()), expected);
-    }
-
-    // ############################################################################################
-    // Tests RegexMatcher::match_bases()
-    // ####################################################################################
-    #[rstest]
-    #[case(false, ".GG", "AGGT", true)] // regex is found in bases, and invert_match is false
-    #[case(true, ".GG", "AGGT", false)] // regex is found in bases, and invert_matches is true
-    #[case(true, ".GG", "CCC", true)] // regex is not found in bases, and invert_match is true
-    #[case(false, ".GG", "CCC", false)] // regex is bot found in bases, and invert_match is false
-    fn test_regex_matcher_match_bases(
-        #[case] invert_match: bool,
-        #[case] pattern: String,
-        #[case] bases: String,
-        #[case] expected: bool,
-    ) {
-        let opts = MatcherOpts {
-            invert_match,
-            reverse_complement: false, // does not impact RegexMatcher::bases_match()
-            color: false,
-        };
-
-        let matcher = RegexMatcher::new(&pattern, opts);
-        assert_eq!(matcher.bases_match(bases.as_bytes()), expected);
-    }
-
-    // ############################################################################################
-    // Tests RegexSetMatcher::bases_match()
-    // ####################################################################################
-    #[rstest]
-    #[case(false, vec!["A.T", ".GG"], "AGTGG", true)] // all patterns are found in bases, and invert_match is false
-    #[case(true, vec!["A.T", ".GG"], "AGTGG", false)] // all patterns are found in bases, and invert_matches is true
-    #[case(false, vec!["A.T", ".TT"], "AGTGG", true)] // some patterns are found in bases, and invert_matches is false
-    #[case(true, vec!["A.T", ".TT"], "AGTGG", false)] // some patterns are found in bases, and invert_matches is true
-    #[case(false, vec!["C.C", ".TT"], "AGTGG", false)] // no patterns are found in bases, and invert_matches is false
-    #[case(true, vec!["C.C", ".TT"], "AGTGG", true)] // no patterns are found in bases, and invert_matches is true
-    fn test_regex_set_matcher_match_bases(
-        #[case] invert_match: bool,
-        #[case] patterns: Vec<&str>,
-        #[case] bases: String,
-        #[case] expected: bool,
-    ) {
-        let opts = MatcherOpts {
-            invert_match,
-            reverse_complement: false, // does not impact RegexSetMatcher::bases_match()
-            color: false,
-        };
-
-        let matcher = RegexSetMatcher::new(patterns, opts);
-        assert_eq!(matcher.bases_match(bases.as_bytes()), expected);
-    }
 }
