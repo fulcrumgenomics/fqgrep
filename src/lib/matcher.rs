@@ -617,8 +617,8 @@ pub mod tests {
     }
     #[test]
     fn test_validate_fixed_pattern_error() {
-        let pattern = "A.GTGTGATG";
-        let msg = String::from("Fixed pattern must contain only DNA bases: A .. [.] .. GTGTGATG");
+        let pattern = "AXGTGTGATG";
+        let msg = String::from("Fixed pattern must contain only DNA bases: A .. [X] .. GTGTGATG");
         let result = validate_fixed_pattern(&pattern);
         let inner = result.unwrap_err().to_string();
         assert_eq!(inner, msg);
