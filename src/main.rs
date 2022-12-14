@@ -622,7 +622,7 @@ pub mod tests {
     ///
     /// # Arguments
     ///
-    /// * `temp_dir` - A temp directory 
+    /// * `temp_dir` - A temp directory
     /// * `seqs` - Test sequences to be written to fastq(s)
     /// * `regexp` - One or more patterns to search for
     /// * `pattern_from_file` - True to write the pattern(s) to file and set opts.file, otherwise use opts.regexp
