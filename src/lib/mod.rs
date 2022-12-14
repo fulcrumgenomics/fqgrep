@@ -71,3 +71,54 @@ const FASTQ_EXTENSIONS: [&str; 2] = ["fastq", "fq"];
 pub fn is_fastq_path<P: AsRef<Path>>(p: &P) -> bool {
     is_path_with_extension(p, FASTQ_EXTENSIONS)
 }
+
+// Tests
+#[cfg(test)]
+pub mod tests {
+    use crate::*;
+    use rstest::rstest;
+    use std::str;
+    use tempfile::TempDir;
+
+    // ############################################################################################
+    // Tests reverse_complement()
+    // ############################################################################################
+
+    #[rstest]
+    #[case("ACGT", "ACGT")] // Reverse complement with even length string
+    #[case("ACG", "CGT")] // Reverse complement with odd length string (tests for off by one error)
+    fn test_reverse_complement(#[case] seq: &str, #[case] expected: &str) {
+        let result = reverse_complement(seq.as_bytes());
+        let string_result = str::from_utf8(&result).unwrap();
+        assert_eq!(&string_result, &expected);
+    }
+
+    // ############################################################################################
+    // Tests is_gzip_path()
+    // ############################################################################################
+
+    #[rstest]
+    #[case("test_fastq.fq.gz", true)] // .fq.gz is valid gzip
+    #[case("test_fastq.fq.bgz", true)] // .fq.bgz is valid gzip
+    #[case("test_fastq.fq.tar", false)] // .fq.tar is invalid gzip
+    fn test_is_gzip_path(#[case] file_name: &str, #[case] expected: bool) {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join(file_name);
+        let result = is_gzip_path(&file_path);
+        assert_eq!(result, expected);
+    }
+    // ############################################################################################
+    // Tests is_fastq_path()
+    // ############################################################################################
+
+    #[rstest]
+    #[case("test_fastq.fq", true)] // .fq is valid fastq
+    #[case("test_fastq.fastq", true)] // .fastq is valid fastq
+    #[case("test_fastq.sam", false)] // .sam is invalid fastq
+    fn test_is_fastq_path(#[case] file_name: &str, #[case] expected: bool) {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join(file_name);
+        let result = is_fastq_path(&file_path);
+        assert_eq!(result, expected);
+    }
+}
