@@ -750,20 +750,21 @@ pub mod tests {
     // ############################################################################################
     #[rstest]
     // Unpaired reads with fixed strings
-    #[case(false, vec!["A"], vec!["AAAA"], true)] // unpaired: fixed string with one match
-    #[case(false, vec!["A", "G"], vec!("AAAA", "GGGG"), true)] // unpaired: fixed string set with two matches
+    #[case(false, vec!["A"], vec!["AAAA", "ATAT", "TATA", "AAAT", "TTTA"], true)] // unpaired: fixed string with one match
+    #[case(false, vec!["A", "G"], vec!["AAAA", "ATAT", "TATA", "AAAT", "TTTA", "GGGG", "CGCG", "GCGC", "CCCG", "GGGC"], true)] // unpaired: fixed string set with two matches
     // Unpaired reads with regex
-    #[case(false, vec!["^A"], vec!["AAAA"], true)] // unpaired: regex with one match
-    #[case(false, vec!["^A", "^G"], vec!("AAAA", "GGGG"), true)] // unpaired: regex set with two matches
+    #[case(false, vec!["^A"], vec!["AAAA", "ATAT", "AAAT"], true)] // unpaired: regex with one match
+    #[case(false, vec!["^A", "^G"], vec!["AAAA", "ATAT", "AAAT", "GGGG", "GCGC", "GGGC"], true)] // unpaired: regex set with two matches
     // Paired reads with fixed string sets
-    #[case(true, vec!["A", "AAAA"], vec!["AAAA", "CCCC"], true)] // paired: fixed string with one match
-    #[case(true, vec!["A", "G"], vec!("AAAA", "CCCC", "TTTT", "GGGG"), true)] // paired: fixed string set with two matches in correct interleave order
-    #[case(true, vec!["A", "G"], vec!("AAAA", "GGGG", "TTTT", "CCCC"), false)]
+    #[case(true, vec!["AAAA"], vec!["AAAA", "CCCC"], true)] // paired: fixed string with one match
+    #[case(true, vec!["A", "G"], vec!["AAAA", "CCCC", "TTTT", "GGGG", "ATAT", "CGCG", "TATA", "GCGC", "AAAT", "CCCG", "TTTA", "GGGC"], true)]
+    // paired: fixed string set with two matches in correct interleave order
+    #[case(true, vec!["A", "G"], vec!["AAAA", "GGGG", "TTTT", "CCCC", "CGCG", "ATAT", "GCGC", "TATA", "CCCG", "AAAT", "GGGC", "TTTA"], false)]
     // paired: fixed string set with two matches in incorrect interleave order
     // Paired reads with regex sets
-    #[case(true, vec!["^A", "A$"], vec!["AAAA", "CCCC"], true)] // paired: regex with one match
-    #[case(true, vec!["^A", "^G"], vec!("AAAA", "CCCC", "TTTT", "GGGG"), true)] // paired: regex set with two matches in correct interleave order
-    #[case(true, vec!["^A", "^G"], vec!("AAAA", "GGGG", "TTTT", "CCCC"), false)] // paired: regex set with two matches in incorrect interleave order
+    #[case(true, vec!["^AAAA"], vec!["AAAA", "CCCC"], true)] // paired: regex with one match
+    #[case(true, vec!["^AA", "^GG"], vec!["AAAA", "CCCC", "TTTT", "GGGG", "AAAT", "CCCG", "TTTA", "GGGC"], true)] // paired: regex set with two matches in correct interleave order
+    #[case(true, vec!["^AA", "^GG"], vec!["AAAA", "GGGG", "TTTT", "CCCC", "TTTA", "CCCG", "AAAT", "GGGC"], false)] // paired: regex set with two matches in incorrect interleave order
     fn test_reads_when_count_false(
         #[case] paired: bool,
         #[case] pattern: Vec<&str>,
@@ -771,7 +772,10 @@ pub mod tests {
         #[case] expected_bool: bool,
     ) {
         let dir = TempDir::new().unwrap();
-        let seqs = vec![vec!["AAAA", "TTTT"], vec!["CCCC", "GGGG"]];
+        let seqs = vec![
+            vec!["AAAA", "TTTT", "ATAT", "TATA", "AAAT", "TTTA"],
+            vec!["CCCC", "GGGG", "CGCG", "GCGC", "CCCG", "GGGC"],
+        ];
         let out_path = dir.path().join(String::from("output.fq"));
         let result_path = &out_path.clone();
         let pattern = pattern.iter().map(|&s| s.to_owned()).collect::<Vec<_>>();
