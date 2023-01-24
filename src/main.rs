@@ -528,8 +528,8 @@ fn process_paired_reads(
         .flatten()
         .collect();
 
-        let _lock = writer.lock.lock();
-        writer.tx.send(matched_reads).expect("Failed to send read");
+    let _lock = writer.lock.lock();
+    writer.tx.send(matched_reads).expect("Failed to send read");
 }
 
 /// Parse args and set up logging / tracing
