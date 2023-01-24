@@ -495,7 +495,7 @@ fn process_paired_reads(
     writer: &FastqWriter,
     progress_logger: &Option<ProgLog>,
 ) {
-    reads
+    let matched_reads = reads
         .into_par_iter()
         .map(|(mut read1, mut read2)| {
             if let Some(progress) = progress_logger {
@@ -520,15 +520,16 @@ fn process_paired_reads(
             }
         })
         .flatten()
-        .fold(std::vec::Vec::new, |mut matched_reads, (r1, r2)| {
-            matched_reads.push(r1);
-            matched_reads.push(r2);
-            matched_reads
+        .fold(std::vec::Vec::new, |mut _matched_reads, (r1, r2)| {
+            _matched_reads.push(r1);
+            _matched_reads.push(r2);
+            _matched_reads
         })
-        .for_each(|matched_read| {
-            let _lock = writer.lock.lock();
-            writer.tx.send(matched_read).expect("Failed to send read");
-        });
+        .flatten()
+        .collect();
+
+    let _lock = writer.lock.lock();
+    writer.tx.send(matched_reads).expect("Failed to send read");
 }
 
 /// Parse args and set up logging / tracing
