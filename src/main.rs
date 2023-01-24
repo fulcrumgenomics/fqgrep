@@ -750,10 +750,10 @@ pub mod tests {
     #[rstest]
     // Unpaired reads with fixed strings
     #[case(false, vec!["A"], vec!["AAAA", "ATAT", "TATA", "AAAT", "TTTA"], true)] // unpaired: fixed string with one match
-    #[case(false, vec!["A", "G"], vec!["AAAA", "GGGG", "ATAT", "TATA", "CGCG", "GCGC", "GGGC", "CCCG", "AAAT", "TTTA"], true)] // unpaired: fixed string set with two matches
+    #[case(false, vec!["A", "G"], vec!["AAAA", "ATAT", "TATA", "AAAT", "TTTA", "GGGG", "CGCG", "GCGC", "CCCG", "GGGC"], true)] // unpaired: fixed string set with two matches
     // Unpaired reads with regex
     #[case(false, vec!["^A"], vec!["AAAA", "ATAT", "AAAT"], true)] // unpaired: regex with one match
-    #[case(false, vec!["^A", "^G"], vec!["AAAA", "GGGG", "ATAT", "GCGC", "AAAT", "GGGC"], true)] // unpaired: regex set with two matches
+    #[case(false, vec!["^A", "^G"], vec!["AAAA", "ATAT", "AAAT", "GGGG", "GCGC", "GGGC"], true)] // unpaired: regex set with two matches
     // Paired reads with fixed string sets
     #[case(true, vec!["AAAA"], vec!["AAAA", "CCCC"], true)] // paired: fixed string with one match
     #[case(true, vec!["A", "G"], vec!["AAAA", "CCCC", "TTTT", "GGGG", "ATAT", "CGCG", "TATA", "GCGC", "AAAT", "CCCG", "TTTA", "GGGC"], true)]
