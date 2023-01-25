@@ -1,7 +1,7 @@
 [package]
 name = "fqgrep"
 authors = ["Nils Homer <nils@fulcrumgenomics.com>", "Seth Stadick <seth@fulcrumgenomics.com>"]
-version = "1.0.1"
+version = "1.0.2"
 edition = "2018"
 license = "MIT"
 description = "Search a pair of fastq files for reads that match a given ref or alt sequence"
