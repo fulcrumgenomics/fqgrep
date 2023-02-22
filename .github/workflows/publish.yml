@@ -48,16 +48,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v3
 
-      - name: Install packages (Ubuntu)
-        if: matrix.os == 'ubuntu-22.04'
-        run: |
-          ci/ubuntu-install-packages
-
-      - name: Install packages (macOS)
-        if: matrix.os == 'macos-12'
-        run: |
-          ci/macos-install-packages
-
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
