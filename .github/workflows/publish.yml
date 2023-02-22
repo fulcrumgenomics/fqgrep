@@ -122,7 +122,6 @@ jobs:
           if [ "${{ matrix.os }}" = "windows-2022" ]; then
             cp "target/${{ matrix.target }}/release/fqgrep.exe" "fqgrep-${{ matrix.target }}"
           else
-            # The man page is only generated on Unix systems. ¯\_(ツ)_/¯
             cp "target/${{ matrix.target }}/release/fqgrep" "fqgrep-${{ matrix.target }}"
           fi
 
