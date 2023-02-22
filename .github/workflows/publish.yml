@@ -12,24 +12,103 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: ubuntu-latest
-            artifact_name: fqgrep
-            asset_name: fqgrep-linux-amd64
-          - os: macos-latest
-            artifact_name: fqgrep
-            asset_name: fqgrep-macos-amd64
-          - os: windows-latest
-            artifact_name: fqgrep.exe
-            asset_name: fqgrep-windows-amd64
+        build: [linux, linux-arm, macos, win-msvc, win-gnu, win32-msvc]
+        include:
+          - build: linux
+            os: ubuntu-22.04
+            rust: nightly
+            target: x86_64-unknown-linux-musl
+            asset_name: fqgrep-x86_64-unknown-linux-musl
+          - build: linux-arm
+            os: ubuntu-22.04
+            rust: nightly
+            target: arm-unknown-linux-gnueabihf
+            asset_name: fqgrep-arm-unknown-linux-gnueabihf
+          - build: macos
+            os: macos-12
+            rust: nightly
+            target: x86_64-apple-darwin
+            asset_name: fqgrep-x86_64-apple-darwin
+          - build: win-msvc
+            os: windows-2022
+            rust: nightly
+            target: x86_64-pc-windows-msvc
+            asset_name: fqgrep-x86_64-pc-windows-msvc
+          - build: win-gnu
+            os: windows-2022
+            rust: nightly
+            target: x86_64-pc-windows-gnu
+            asset_name: fqgrep-x86_64-pc-windows-gnu
+          - build: win32-msvc
+            os: windows-2022
+            rust: nightly
+            target: i686-pc-windows-msvc
+            asset_name: fqgrep-i686-pc-windows-msvc
 
     steps:
-      - uses: actions/checkout@v2
-      - name: Build
-        run: cargo build --release --locked
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Install packages (Ubuntu)
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          ci/ubuntu-install-packages
+
+      - name: Install packages (macOS)
+        if: matrix.os == 'macos-12'
+        run: |
+        ci/macos-install-packages
+
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+          target: ${{ matrix.target }}
+
+      - name: Use Cross
+        shell: bash
+        run: |
+          cargo install cross
+          echo "CARGO=cross" >> $GITHUB_ENV
+          echo "TARGET_FLAGS=--target ${{ matrix.target }}" >> $GITHUB_ENV
+          echo "TARGET_DIR=./target/${{ matrix.target }}" >> $GITHUB_ENV
+
+      - name: Show command used for Cargo
+        run: |
+          echo "cargo command is: ${{ env.CARGO }}"
+          echo "target flag is: ${{ env.TARGET_FLAGS }}"
+          echo "target dir is: ${{ env.TARGET_DIR }}"
+      
+      - name: Build release binary
+        run: ${{ env.CARGO }} build --verbose --release --features pcre2 ${{ env.TARGET_FLAGS }}
+
+      - name: Strip release binary (linux and macos)
+        if: matrix.build == 'linux' || matrix.build == 'macos'
+        run: strip "target/${{ matrix.target }}/release/rg"
+
+      - name: Strip release binary (arm)
+        if: matrix.build == 'linux-arm'
+        run: |
+          docker run --rm -v \
+            "$PWD/target:/target:Z" \
+            rustembedded/cross:arm-unknown-linux-gnueabihf \
+            arm-linux-gnueabihf-strip \
+            /target/arm-unknown-linux-gnueabihf/release/rg
+
+      - name: Rename binary
+        run: |
+          if [ "${{ matrix.os }}" = "windows-2022" ]; then
+            cp "target/${{ matrix.target }}/release/rg.exe" "fqgrep-${{ matrix.target }}"
+          else
+            # The man page is only generated on Unix systems. ¯\_(ツ)_/¯
+            cp "target/${{ matrix.target }}/release/rg" "fqgrep-${{ matrix.target }}"
+          fi
+
       - name: Upload binaries to release
         uses: svenstaro/upload-release-action@v2
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: target/release/${{ matrix.artifact_name }}
-          asset_name: ${{ matrix.asset_name }}
+          file: fqgrep-${{ matrix.target }}
+          asset_name: fqgrep-${{ matrix.target }}
           tag: ${{ github.ref }}
