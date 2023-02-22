@@ -20,17 +20,26 @@ jobs:
       # Emit backtraces on panics.
       RUST_BACKTRACE: 1
     strategy:
+      fail-fast: false
       matrix:
         build: [linux, linux-arm, macos, win-msvc, win-gnu, win32-msvc]
         include:
+          # TODO: 
+          # - arm-unknown-linux-musleabihf
+          # - aarch64-unknown-linux-gnu
+          # - i686-unknown-linux-gnu
+          # - i686-unknown-linux-musl
+          # - x86_64-unknown-linux-gnu
           - build: linux
             os: ubuntu-22.04
             rust: nightly
+            use-cross: true
             target: x86_64-unknown-linux-musl
             asset_name: fqgrep-x86_64-unknown-linux-musl
           - build: linux-arm
             os: ubuntu-22.04
             rust: nightly
+            use-cross: true
             target: arm-unknown-linux-gnueabihf
             asset_name: fqgrep-arm-unknown-linux-gnueabihf
           - build: macos
@@ -66,9 +75,14 @@ jobs:
 
       - name: Use Cross
         shell: bash
+        if: ${{ matrix.use-cross == true }}
         run: |
           cargo install cross
           echo "CARGO=cross" >> $GITHUB_ENV
+      
+      - name: Set target environment variables
+        shell: bash
+        run: |
           echo "TARGET_FLAGS=--target ${{ matrix.target }}" >> $GITHUB_ENV
           echo "TARGET_DIR=./target/${{ matrix.target }}" >> $GITHUB_ENV
 
@@ -82,7 +96,7 @@ jobs:
           echo "target dir is: ${{ env.TARGET_DIR }}"
 
       - name: Build release binary
-        run: ${{ env.CARGO }} build --verbose --release ${{ env.TARGET_FLAGS }}
+        run: ${{ env.CARGO }} build --locked --verbose --release ${{ env.TARGET_FLAGS }}
 
       - name: Strip release binary (linux and macos)
         if: matrix.build == 'linux' || matrix.build == 'macos'
