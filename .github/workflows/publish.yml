@@ -51,17 +51,17 @@ jobs:
             os: windows-2022
             rust: nightly
             target: x86_64-pc-windows-msvc
-            asset_name: fqgrep-x86_64-pc-windows-msvc
+            asset_name: fqgrep-x86_64-pc-windows-msvc.exe
           - build: win-gnu
             os: windows-2022
             rust: nightly
             target: x86_64-pc-windows-gnu
-            asset_name: fqgrep-x86_64-pc-windows-gnu
+            asset_name: fqgrep-x86_64-pc-windows-gnu.exe
           - build: win32-msvc
             os: windows-2022
             rust: nightly
             target: i686-pc-windows-msvc
-            asset_name: fqgrep-i686-pc-windows-msvc
+            asset_name: fqgrep-i686-pc-windows-msvc.exe
 
     steps:
       - name: Checkout repository
@@ -72,6 +72,11 @@ jobs:
         with:
           toolchain: ${{ matrix.rust }}
           target: ${{ matrix.target }}
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.job.os }}-${{ matrix.job.target }}
 
       - name: Use Cross
         shell: bash
@@ -112,6 +117,7 @@ jobs:
             /target/arm-unknown-linux-gnueabihf/release/fqgrep
 
       - name: Rename binary
+        shell: bash
         run: |
           if [ "${{ matrix.os }}" = "windows-2022" ]; then
             cp "target/${{ matrix.target }}/release/fqgrep.exe" "fqgrep-${{ matrix.target }}"
@@ -125,5 +131,5 @@ jobs:
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
           file: fqgrep-${{ matrix.target }}
-          asset_name: fqgrep-${{ matrix.target }}
+          asset_name: ${{ matrix.asset_name }}
           tag: ${{ github.ref }}
