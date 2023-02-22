@@ -6,3 +6,7 @@
 rustflags = ["-C", "target-feature=+crt-static"]
 [target.i686-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]
+
+# On ARM, need to link to the atomic library
+[target.arm-unknown-linux-gnueabihf]
+rustflags = ["-C", "link-args=-latomic"]
