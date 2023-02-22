@@ -80,6 +80,9 @@ jobs:
           echo "cargo command is: ${{ env.CARGO }}"
           echo "target flag is: ${{ env.TARGET_FLAGS }}"
           echo "target dir is: ${{ env.TARGET_DIR }}"
+
+      - name: Add -latomic (arm)
+        run: echo "RUSTFLAGS=-C link-args=-latomic" >> $GITHUB_ENV
       
       - name: Build release binary
         run: ${{ env.CARGO }} build --verbose --release ${{ env.TARGET_FLAGS }}
