@@ -82,6 +82,7 @@ jobs:
           echo "target dir is: ${{ env.TARGET_DIR }}"
 
       - name: Add -latomic (arm)
+        if: matrix.build == 'linux-arm'
         run: echo "RUSTFLAGS=-C link-args=-latomic" >> $GITHUB_ENV
       
       - name: Build release binary
