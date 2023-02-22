@@ -72,6 +72,9 @@ jobs:
           echo "TARGET_FLAGS=--target ${{ matrix.target }}" >> $GITHUB_ENV
           echo "TARGET_DIR=./target/${{ matrix.target }}" >> $GITHUB_ENV
 
+      - name: Add missing target
+        run: rustup target add ${{ matrix.target }}
+
       - name: Show command used for Cargo
         run: |
           echo "cargo command is: ${{ env.CARGO }}"
@@ -83,7 +86,7 @@ jobs:
 
       - name: Strip release binary (linux and macos)
         if: matrix.build == 'linux' || matrix.build == 'macos'
-        run: strip "target/${{ matrix.target }}/release/rg"
+        run: strip "target/${{ matrix.target }}/release/fqgrep"
 
       - name: Strip release binary (arm)
         if: matrix.build == 'linux-arm'
@@ -92,15 +95,15 @@ jobs:
             "$PWD/target:/target:Z" \
             rustembedded/cross:arm-unknown-linux-gnueabihf \
             arm-linux-gnueabihf-strip \
-            /target/arm-unknown-linux-gnueabihf/release/rg
+            /target/arm-unknown-linux-gnueabihf/release/fqgrep
 
       - name: Rename binary
         run: |
           if [ "${{ matrix.os }}" = "windows-2022" ]; then
-            cp "target/${{ matrix.target }}/release/rg.exe" "fqgrep-${{ matrix.target }}"
+            cp "target/${{ matrix.target }}/release/fqgrep.exe" "fqgrep-${{ matrix.target }}"
           else
             # The man page is only generated on Unix systems. ¯\_(ツ)_/¯
-            cp "target/${{ matrix.target }}/release/rg" "fqgrep-${{ matrix.target }}"
+            cp "target/${{ matrix.target }}/release/fqgrep" "fqgrep-${{ matrix.target }}"
           fi
 
       - name: Upload binaries to release
