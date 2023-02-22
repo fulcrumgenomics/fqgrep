@@ -19,6 +19,8 @@ jobs:
       TARGET_DIR: ./target
       # Emit backtraces on panics.
       RUST_BACKTRACE: 1
+      # See: https://github.com/romanz/electrs/issues/391#issuecomment-813064643 
+      RUSTFLAGS: "-C link-args=-latomic"
     strategy:
       matrix:
         build: [linux, linux-arm, macos, win-msvc, win-gnu, win32-msvc]
