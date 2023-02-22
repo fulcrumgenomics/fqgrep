@@ -7,8 +7,18 @@ on:
 
 jobs:
   publish:
-    name: Publish for ${{ matrix.os }}
+    name: Publish for ${{ matrix.os }} - ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    env:
+      # For some builds, we use cross to test on 32-bit and big-endian
+      # systems.
+      CARGO: cargo
+      # When CARGO is set to CROSS, this is set to `--target matrix.target`.
+      TARGET_FLAGS: ""
+      # When CARGO is set to CROSS, TARGET_DIR includes matrix.target.
+      TARGET_DIR: ./target
+      # Emit backtraces on panics.
+      RUST_BACKTRACE: 1
     strategy:
       matrix:
         build: [linux, linux-arm, macos, win-msvc, win-gnu, win32-msvc]
@@ -69,7 +79,7 @@ jobs:
           echo "target dir is: ${{ env.TARGET_DIR }}"
       
       - name: Build release binary
-        run: ${{ env.CARGO }} build --verbose --release --features pcre2 ${{ env.TARGET_FLAGS }}
+        run: ${{ env.CARGO }} build --verbose --release ${{ env.TARGET_FLAGS }}
 
       - name: Strip release binary (linux and macos)
         if: matrix.build == 'linux' || matrix.build == 'macos'
