@@ -404,8 +404,6 @@ impl Matcher for BitMaskMatcher {
         let mut ranges = bitenc_find_all(&encode(bases), &self.bitenc, self.has_iupac);
         if self.opts().reverse_complement {
             let bases_revcomp = &reverse_complement(bases);
-            // FIXME: invert range!
-
             let ranges_revcomp: Vec<Range<usize>> =
                 bitenc_find_all(&encode(bases_revcomp), &self.bitenc, self.has_iupac)
                     .iter()
@@ -473,7 +471,6 @@ impl Matcher for BitMaskSetMatcher {
                 .iter()
                 .enumerate()
                 .flat_map(|(index, bitenc)| {
-                    // FIXME: invert range!
                     bitenc_find_all(&encode(bases_revcomp), bitenc, self.has_iupac[index])
                         .iter()
                         .map(|range| Range {
