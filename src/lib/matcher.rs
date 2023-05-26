@@ -311,8 +311,33 @@ impl FixedStringSetMatcher {
     }
 }
 
-fn bitenc_find(bases: &BitEnc, needle: &BitEnc) -> bool {
+fn bitenc_find(bases: &BitEnc, needle: &BitEnc, has_iupac: bool) -> bool {
+    // can use a rolling hash to quickly discount offsets.  But the needle cannot have IUPAC codes!
+    let mut bases_hash: usize = 0;
+    let needle_hash = if has_iupac {
+        0
+    } else {
+        let mut hash: usize = 0;
+        for i in 0..needle.nr_symbols() {
+            hash += needle.get(i).unwrap() as usize;
+        }
+        hash
+    };
     'outer: for offset in 0..=bases.nr_symbols() - needle.nr_symbols() {
+        if !has_iupac {
+            if offset == 0 {
+                for i in 0..needle.nr_symbols() {
+                    let base = bases.get(i).unwrap();
+                    bases_hash += base as usize;
+                }
+            } else {
+                bases_hash += bases.get(offset + needle.nr_symbols() - 1).unwrap() as usize;
+                bases_hash -= bases.get(offset - 1).unwrap() as usize;
+            }
+            if bases_hash != needle_hash {
+                continue 'outer;
+            }
+        }
         for i in 0..needle.nr_symbols() {
             let base = bases.get(offset + i).unwrap();
             if needle.get(i).unwrap() & base != base {
@@ -324,9 +349,34 @@ fn bitenc_find(bases: &BitEnc, needle: &BitEnc) -> bool {
     false
 }
 
-fn bitenc_find_all(bases: &BitEnc, needle: &BitEnc) -> Vec<Range<usize>> {
+fn bitenc_find_all(bases: &BitEnc, needle: &BitEnc, has_iupac: bool) -> Vec<Range<usize>> {
     let mut ranges: Vec<Range<usize>> = Vec::new();
+    // can use a rolling hash to quickly discount offsets.  But the needle cannot have IUPAC codes!
+    let mut bases_hash: usize = 0;
+    let needle_hash = if has_iupac {
+        0
+    } else {
+        let mut hash: usize = 0;
+        for i in 0..needle.nr_symbols() {
+            hash += needle.get(i).unwrap() as usize;
+        }
+        hash
+    };
     'outer: for offset in 0..=(bases.nr_symbols() - needle.nr_symbols()) {
+        if !has_iupac {
+            if offset == 0 {
+                for i in 0..needle.nr_symbols() {
+                    let base = bases.get(i).unwrap();
+                    bases_hash += base as usize;
+                }
+            } else {
+                bases_hash += bases.get(offset + needle.nr_symbols() - 1).unwrap() as usize;
+                bases_hash -= bases.get(offset - 1).unwrap() as usize;
+            }
+            if bases_hash != needle_hash {
+                continue 'outer;
+            }
+        }
         for i in 0..needle.nr_symbols() {
             let vec_value = bases.get(offset + i).unwrap();
             if needle.get(i).unwrap() & vec_value != vec_value {
@@ -341,22 +391,23 @@ fn bitenc_find_all(bases: &BitEnc, needle: &BitEnc) -> Vec<Range<usize>> {
 /// Matcher for a bitvector
 pub struct BitMaskMatcher {
     bitenc: BitEnc,
+    has_iupac: bool,
     opts: MatcherOpts,
 }
 
 impl Matcher for BitMaskMatcher {
     fn bases_match(&self, bases: &[u8]) -> bool {
-        bitenc_find(&encode(bases), &self.bitenc) != self.opts.invert_match
+        bitenc_find(&encode(bases), &self.bitenc, self.has_iupac) != self.opts.invert_match
     }
 
     fn color_matched_bases(&self, bases: &[u8], quals: &[u8]) -> (Vec<u8>, Vec<u8>) {
-        let mut ranges = bitenc_find_all(&encode(bases), &self.bitenc);
+        let mut ranges = bitenc_find_all(&encode(bases), &self.bitenc, self.has_iupac);
         if self.opts().reverse_complement {
             let bases_revcomp = &reverse_complement(bases);
             // FIXME: invert range!
 
             let ranges_revcomp: Vec<Range<usize>> =
-                bitenc_find_all(&encode(bases_revcomp), &self.bitenc)
+                bitenc_find_all(&encode(bases_revcomp), &self.bitenc, self.has_iupac)
                     .iter()
                     .map(|range| Range {
                         start: bases.len() - range.end,
@@ -380,13 +431,19 @@ impl Matcher for BitMaskMatcher {
 
 impl BitMaskMatcher {
     pub fn new(bitenc: BitEnc, opts: MatcherOpts) -> Self {
-        Self { bitenc, opts }
+        let has_iupac = !bitenc.iter().all(|value| DNA_BASES.contains(&value));
+        Self {
+            bitenc,
+            has_iupac,
+            opts,
+        }
     }
 }
 
 /// Matcher for a set of fixed string patterns
 pub struct BitMaskSetMatcher {
     bitencs: Vec<BitEnc>,
+    has_iupac: Vec<bool>,
     opts: MatcherOpts,
 }
 
@@ -395,7 +452,8 @@ impl Matcher for BitMaskSetMatcher {
         let bases = encode(bases);
         self.bitencs
             .iter()
-            .any(|needle| bitenc_find(&bases, needle))
+            .enumerate()
+            .any(|(index, needle)| bitenc_find(&bases, needle, self.has_iupac[index]))
             != self.opts.invert_match
     }
 
@@ -403,16 +461,20 @@ impl Matcher for BitMaskSetMatcher {
         let mut ranges = self
             .bitencs
             .iter()
-            .flat_map(|bitenc| bitenc_find_all(&encode(bases), bitenc))
+            .enumerate()
+            .flat_map(|(index, bitenc)| {
+                bitenc_find_all(&encode(bases), bitenc, self.has_iupac[index])
+            })
             .collect::<Vec<_>>();
         if self.opts().reverse_complement {
             let bases_revcomp = &reverse_complement(bases);
             let ranges_revcomp = self
                 .bitencs
                 .iter()
-                .flat_map(|bitenc| {
+                .enumerate()
+                .flat_map(|(index, bitenc)| {
                     // FIXME: invert range!
-                    bitenc_find_all(&encode(bases_revcomp), bitenc)
+                    bitenc_find_all(&encode(bases_revcomp), bitenc, self.has_iupac[index])
                         .iter()
                         .map(|range| Range {
                             start: bases.len() - range.end,
@@ -438,7 +500,15 @@ impl Matcher for BitMaskSetMatcher {
 
 impl BitMaskSetMatcher {
     pub fn new(bitencs: Vec<BitEnc>, opts: MatcherOpts) -> Self {
-        Self { bitencs, opts }
+        let has_iupac = bitencs
+            .iter()
+            .map(|bitenc| !bitenc.iter().all(|value| DNA_BASES.contains(&value)))
+            .collect();
+        Self {
+            bitencs,
+            has_iupac,
+            opts,
+        }
     }
 }
 
