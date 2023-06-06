@@ -502,11 +502,12 @@ fn process_paired_reads(
                 progress.record();
                 progress.record();
             }
-            assert!(
-                read1.head() == read2.head(),
+            assert_eq!(
+                read1.id_bytes(),
+                read2.id_bytes(),
                 "Mismatching read pair!  R1: {} R2: {}",
-                std::str::from_utf8(read1.head()).unwrap(),
-                std::str::from_utf8(read2.head()).unwrap()
+                read1.id().unwrap(),
+                read2.id().unwrap()
             );
             // NB: if the output is to be colored, always call read_match on read2, regardless of
             // whether or not read1 had a match, so that read2 is always colored.  If the output
