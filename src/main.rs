@@ -65,6 +65,7 @@ pub mod built_info {
 }
 
 struct FastqWriter {
+    // TODO: use Sender<Vec<(FirstOfPair/SecondOfPair, OwnedRecord)>>
     tx: Sender<Vec<OwnedRecord>>,
     lock: Mutex<()>,
 }
@@ -76,6 +77,7 @@ impl FastqWriter {
             bounded(WRITER_CHANNEL_SIZE);
 
         std::thread::spawn(move || {
+            // TODO: one or two writers based on separate or interleaved output
             let mut maybe_writer: Option<Box<dyn Write>> = {
                 if count {
                     None
@@ -124,7 +126,11 @@ impl FastqWriter {
     }
 }
 
+// TODO: needs to know what read # it is, or if it is interleaved
+// - enum: Single, Paired, Interleaved
+// - enum: FirstOfPair, SecondOfPair
 fn spawn_reader(file: PathBuf, decompress: bool) -> Receiver<Vec<OwnedRecord>> {
+    // TODO: Change these from Sender<Vec<(FirstOfPair, OwnedRecord)>>...
     let (tx, rx) = bounded(READER_CHANNEL_SIZE);
     std::thread::spawn(move || {
         // Open the file or standad input
@@ -266,8 +272,8 @@ struct Opts {
 
     /// Hidden option to capture stdout for testing
     ///
-    #[structopt(long, hidden = true)]
-    output: Option<PathBuf>,
+    #[structopt(long, parse(from_os_str))]
+    output: Vec<PathBuf>,
 }
 
 fn read_patterns(file: &PathBuf) -> Result<Vec<String>> {
