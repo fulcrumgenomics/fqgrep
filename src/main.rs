@@ -15,6 +15,7 @@ use parking_lot::Mutex;
 use proglog::{CountFormatterKind, ProgLog, ProgLogBuilder};
 use rayon::prelude::*;
 use seq_io::fastq::{self, OwnedRecord, Record};
+use serde::{Deserialize, Serialize};
 use std::process::ExitCode;
 use std::{
     fs::File,
@@ -64,46 +65,121 @@ pub mod built_info {
     }
 }
 
+#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RecordType {
+    #[default]
+    FirstOfPair,
+    SecondOfPair,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OutputType {
+    #[default]
+    Interleaved,
+    Fragment,
+    Paired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct FastqOutputRecord {
+    pub record: OwnedRecord,
+    pub tpe: RecordType,
+}
+
 struct FastqWriter {
-    // TODO: use Sender<Vec<(FirstOfPair/SecondOfPair, OwnedRecord)>>
-    tx: Sender<Vec<OwnedRecord>>,
+    tx: Sender<Vec<FastqOutputRecord>>,
     lock: Mutex<()>,
 }
 
 impl FastqWriter {
-    fn new(count_tx: Sender<usize>, count: bool, paired: bool, output: Option<PathBuf>) -> Self {
+    fn new(
+        count_tx: Sender<usize>,
+        count: bool,
+        paired: bool,
+        output_type: OutputType,
+        output: Vec<PathBuf>,
+    ) -> Self {
         // TODO: try making this unbounded
-        let (tx, rx): (Sender<Vec<OwnedRecord>>, Receiver<Vec<OwnedRecord>>) =
-            bounded(WRITER_CHANNEL_SIZE);
+        let (tx, rx): (
+            Sender<Vec<FastqOutputRecord>>,
+            Receiver<Vec<FastqOutputRecord>>,
+        ) = bounded(WRITER_CHANNEL_SIZE);
 
         std::thread::spawn(move || {
-            // TODO: one or two writers based on separate or interleaved output
-            let mut maybe_writer: Option<Box<dyn Write>> = {
-                if count {
-                    None
-                } else if let Some(file_path) = output {
-                    Some(Box::new(BufWriter::with_capacity(
-                        BUFSIZE,
-                        File::create(file_path).unwrap(),
-                    )))
-                } else {
-                    Some(Box::new(BufWriter::with_capacity(
-                        BUFSIZE,
-                        std::io::stdout(),
-                    )))
-                }
-            };
+            let (mut r1_writer, mut r2_writer): (Option<Box<dyn Write>>, Option<Box<dyn Write>>) =
+                {
+                    if count {
+                        (None, None)
+                    } else if output.is_empty() {
+                        assert!(output_type != OutputType::Paired);
+                        let writer: Option<Box<dyn Write>> = Some(Box::new(
+                            BufWriter::with_capacity(BUFSIZE, std::io::stdout()),
+                        ));
+                        (writer, None)
+                    } else if output.len() == 1 {
+                        assert!(output_type != OutputType::Paired);
+                        let writer: Option<Box<dyn Write>> = Some(Box::new(
+                            BufWriter::with_capacity(BUFSIZE, File::create(&output[0]).unwrap()),
+                        ));
+                        (writer, None)
+                    } else if output.len() == 2 {
+                        assert!(output_type == OutputType::Paired);
+                        assert!(!paired);
+                        let w1: Option<Box<dyn Write>> = Some(Box::new(BufWriter::with_capacity(
+                            BUFSIZE,
+                            File::create(&output[0]).unwrap(),
+                        )));
+                        let w2: Option<Box<dyn Write>> = Some(Box::new(BufWriter::with_capacity(
+                            BUFSIZE,
+                            File::create(&output[1]).unwrap(),
+                        )));
+                        (w1, w2)
+                    } else {
+                        panic!("Expected 0-2 output files, got {}", output.len());
+                    }
+                };
 
             let mut num_matches = 0;
             while let Ok(reads) = rx.recv() {
                 num_matches += reads.len();
-                if let Some(ref mut writer) = maybe_writer {
+                if !count {
                     for read in reads {
-                        fastq::write_to(&mut *writer, &read.head, &read.seq, &read.qual)
-                            .expect("failed writing read");
+                        match read.tpe {
+                            RecordType::FirstOfPair => {
+                                if let Some(writer) = r1_writer.as_mut() {
+                                    fastq::write_to(
+                                        &mut *writer,
+                                        &read.record.head,
+                                        &read.record.seq,
+                                        &read.record.qual,
+                                    )
+                                    .expect("failed writing read");
+                                }
+                            }
+                            RecordType::SecondOfPair => {
+                                let r2_writer = if output_type == OutputType::Interleaved {
+                                    r1_writer.as_mut()
+                                } else {
+                                    r2_writer.as_mut()
+                                };
+                                if let Some(writer) = r2_writer {
+                                    fastq::write_to(
+                                        &mut *writer,
+                                        &read.record.head,
+                                        &read.record.seq,
+                                        &read.record.qual,
+                                    )
+                                    .expect("failed writing read");
+                                }
+                            }
+                        }
+
+                        // fastq::write_to(&mut *writer, &read.head, &read.seq, &read.qual)
+                        //     .expect("failed writing read");
                     }
-                };
+                }
             }
+
             if paired {
                 num_matches /= 2;
             }
@@ -114,9 +190,13 @@ impl FastqWriter {
                     .unwrap();
             }
 
-            if let Some(mut writer) = maybe_writer {
-                writer.flush().expect("Error flushing writer");
+            if let Some(mut w) = r1_writer {
+                w.flush().expect("Error flushing writer");
             };
+            if let Some(mut w) = r2_writer {
+                w.flush().expect("Error flushing writer");
+            };
+
             count_tx
                 .send(num_matches)
                 .expect("failed sending final count");
@@ -126,10 +206,13 @@ impl FastqWriter {
     }
 }
 
-// TODO: needs to know what read # it is, or if it is interleaved
-// - enum: Single, Paired, Interleaved
-// - enum: FirstOfPair, SecondOfPair
-fn spawn_reader(file: PathBuf, decompress: bool) -> Receiver<Vec<OwnedRecord>> {
+// record_type is None if the input is assumed to be interleaved paired end, FirstOfPair for
+// fragment reads or first end of pair reads, and SecondOfPair for the second end of paired reads.
+fn spawn_reader(
+    file: PathBuf,
+    record_type: Option<RecordType>,
+    decompress: bool,
+) -> Receiver<Vec<FastqOutputRecord>> {
     // TODO: Change these from Sender<Vec<(FirstOfPair, OwnedRecord)>>...
     let (tx, rx) = bounded(READER_CHANNEL_SIZE);
     std::thread::spawn(move || {
@@ -154,14 +237,37 @@ fn spawn_reader(file: PathBuf, decompress: bool) -> Receiver<Vec<OwnedRecord>> {
             }
         };
         // Open a FASTQ reader, get an iterator over the records, and chunk them
-        let fastq_reader = fastq::Reader::with_capacity(maybe_decoder_handle, BUFSIZE)
-            .into_records()
-            .chunks(CHUNKSIZE * num_cpus::get());
-        // Iterate over the chunks
-        for chunk in &fastq_reader {
-            tx.send(chunk.map(|r| r.expect("Error reading")).collect())
-                .expect("Error sending");
-        }
+        let fastq_reader =
+            fastq::Reader::with_capacity(maybe_decoder_handle, BUFSIZE).into_records();
+
+        match record_type {
+            None => {
+                let iter = fastq_reader.into_iter().enumerate().map(|(index, record)| {
+                    let bit = index & 0x1;
+                    let tpe = if bit == 0 {
+                        RecordType::FirstOfPair
+                    } else {
+                        RecordType::SecondOfPair
+                    };
+                    FastqOutputRecord {
+                        record: record.expect("Error reading"),
+                        tpe,
+                    }
+                });
+                for chunk in &iter.chunks(CHUNKSIZE * num_cpus::get()) {
+                    tx.send(chunk.collect()).expect("Error sending");
+                }
+            }
+            Some(tpe) => {
+                let iter = fastq_reader.into_iter().map(|record| FastqOutputRecord {
+                    record: record.expect("Error reading"),
+                    tpe: tpe.clone(),
+                });
+                for chunk in &iter.chunks(CHUNKSIZE * num_cpus::get()) {
+                    tx.send(chunk.collect()).expect("Error sending");
+                }
+            }
+        };
     });
     rx
 }
@@ -385,6 +491,31 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
         }
     }
 
+    // set output_type
+    let output_type = if opts.paired {
+        if opts.output.len() <= 1 {
+            OutputType::Interleaved
+        } else {
+            OutputType::Paired
+        }
+    } else {
+        OutputType::Fragment
+    };
+    match output_type {
+        OutputType::Interleaved | OutputType::Fragment => assert!(
+            opts.output.len() <= 1,
+            "{} output files specified, but expected {:?} output",
+            opts.output.len(),
+            OutputType::Fragment
+        ),
+        OutputType::Paired => assert!(
+            opts.output.len() == 2,
+            "{} output files specified, but expected {:?} output",
+            opts.output.len(),
+            OutputType::Paired
+        ),
+    }
+
     // Set up a progress logger if desired
     let progress_logger = if opts.progress {
         Some(
@@ -421,7 +552,13 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
     let (count_tx, count_rx): (Sender<usize>, Receiver<usize>) = bounded(1);
 
     // The writer of final counts or matching records
-    let writer = FastqWriter::new(count_tx, opts.count, opts.paired, opts.output.clone());
+    let writer = FastqWriter::new(
+        count_tx,
+        opts.count,
+        opts.paired,
+        output_type,
+        opts.output.clone(),
+    );
 
     // The main loop
     pool.install(|| {
@@ -435,11 +572,11 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
             if files.len() == 1 {
                 // Interleaved paired end FASTQ
                 // The channel FASTQ record chunks are received after being read in
-                let rx = spawn_reader(files[0].clone(), opts.decompress);
+                let rx = spawn_reader(files[0].clone(), None, opts.decompress);
                 for reads in izip!(rx.iter()) {
                     let paired_reads = reads
                         .into_iter()
-                        .tuples::<(OwnedRecord, OwnedRecord)>()
+                        .tuples::<(FastqOutputRecord, FastqOutputRecord)>()
                         .collect_vec();
                     process_paired_reads(paired_reads, &matcher, &writer, &progress_logger);
                 }
@@ -447,8 +584,16 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
                 // Pairs of FASTQ files
                 for file_pairs in files.chunks_exact(2) {
                     // The channels for R1 and R2 with FASTQ record chunks that are received after being read in
-                    let rx1 = spawn_reader(file_pairs[0].clone(), opts.decompress);
-                    let rx2 = spawn_reader(file_pairs[1].clone(), opts.decompress);
+                    let rx1 = spawn_reader(
+                        file_pairs[0].clone(),
+                        Some(RecordType::FirstOfPair),
+                        opts.decompress,
+                    );
+                    let rx2 = spawn_reader(
+                        file_pairs[1].clone(),
+                        Some(RecordType::SecondOfPair),
+                        opts.decompress,
+                    );
                     for (reads1, reads2) in izip!(rx1.iter(), rx2.iter()) {
                         let paired_reads = reads1.into_iter().zip(reads2.into_iter()).collect_vec();
                         process_paired_reads(paired_reads, &matcher, &writer, &progress_logger);
@@ -459,17 +604,17 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
             // Process one FASTQ at a time
             for file in files {
                 // The channel FASTQ record chunks are received after being read in
-                let rx = spawn_reader(file.clone(), opts.decompress);
+                let rx = spawn_reader(file.clone(), Some(RecordType::FirstOfPair), opts.decompress);
                 for reads in rx.iter() {
                     // Get the matched reads
-                    let matched_reads: Vec<OwnedRecord> = reads
+                    let matched_reads: Vec<FastqOutputRecord> = reads
                         .into_par_iter()
-                        .map(|mut read| -> Option<OwnedRecord> {
+                        .map(|mut record| -> Option<FastqOutputRecord> {
                             if let Some(progress) = &progress_logger {
                                 progress.record();
                             }
-                            if matcher.read_match(&mut read) {
-                                Some(read)
+                            if matcher.read_match(&mut record.record) {
+                                Some(record)
                             } else {
                                 None
                             }
@@ -496,32 +641,34 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
 /// Process a chunk of paired end records in parallel.
 #[allow(clippy::borrowed_box)] // FIXME: remove me later and solve
 fn process_paired_reads(
-    reads: Vec<(OwnedRecord, OwnedRecord)>,
+    reads: Vec<(FastqOutputRecord, FastqOutputRecord)>,
     matcher: &Box<dyn Matcher + Sync + Send>,
     writer: &FastqWriter,
     progress_logger: &Option<ProgLog>,
 ) {
     let matched_reads = reads
         .into_par_iter()
-        .map(|(mut read1, mut read2)| {
+        .map(|(mut record1, mut record2)| {
+            let r1 = &mut record1.record;
+            let r2 = &mut record2.record;
             if let Some(progress) = progress_logger {
                 progress.record();
                 progress.record();
             }
             assert_eq!(
-                read1.id_bytes(),
-                read2.id_bytes(),
+                r1.id_bytes(),
+                r2.id_bytes(),
                 "Mismatching read pair!  R1: {} R2: {}",
-                read1.id().unwrap(),
-                read2.id().unwrap()
+                r1.id().unwrap(),
+                r2.id().unwrap()
             );
             // NB: if the output is to be colored, always call read_match on read2, regardless of
             // whether or not read1 had a match, so that read2 is always colored.  If the output
             // isn't to be colored, only search for a match in read2 if read1 does not have a match
-            let match1 = matcher.read_match(&mut read1);
-            let match2 = (!matcher.opts().color && match1) || matcher.read_match(&mut read2);
+            let match1 = matcher.read_match(r1);
+            let match2 = (!matcher.opts().color && match1) || matcher.read_match(r2);
             if match1 || match2 {
-                Some((read1, read2))
+                Some((record1, record2))
             } else {
                 None
             }
@@ -647,7 +794,7 @@ pub mod tests {
         seqs: &Vec<Vec<&str>>,
         regexp: &Vec<String>,
         pattern_from_file: bool,
-        output: Option<PathBuf>,
+        output: Vec<PathBuf>,
         compression: String,
     ) -> Opts {
         let fq_path = write_fastq(&dir, &seqs, compression);
@@ -660,16 +807,10 @@ pub mod tests {
             }
         };
 
-        let return_opts = Opts {
+        Opts {
             threads: 4,
             color: Color::Never,
-            count: {
-                if &output == &None {
-                    true
-                } else {
-                    false
-                }
-            },
+            count: output.is_empty(),
             regexp: pattern_string,
             fixed_strings: false,
             file: pattern_file,
@@ -678,10 +819,9 @@ pub mod tests {
             paired: false,
             reverse_complement: false,
             progress: true,
-            args: fq_path.to_vec(),
-            output: output,
-        };
-        return_opts
+            args: fq_path,
+            output,
+        }
     }
 
     /// Returns sequences from fastq
@@ -746,7 +886,7 @@ pub mod tests {
             vec!["GGTT", "GGCC"],
         ];
         let pattern = pattern.iter().map(|&s| s.to_owned()).collect::<Vec<_>>();
-        let mut opts = build_opts(&dir, &seqs, &pattern, true, None, String::from(".fq"));
+        let mut opts = build_opts(&dir, &seqs, &pattern, true, Vec::new(), String::from(".fq"));
         opts.paired = paired;
         let result = fqgrep_from_opts(&opts);
         assert_eq!(result.unwrap(), expected);
@@ -791,7 +931,7 @@ pub mod tests {
             &seqs,
             &pattern,
             true,
-            Some(out_path),
+            vec![out_path],
             String::from(".fq"),
         );
 
@@ -828,7 +968,14 @@ pub mod tests {
         let dir = TempDir::new().unwrap();
         let seqs = vec![vec!["GGGG", "GGGG"], vec!["AAAA", "CCCC"]];
         let pattern = vec![String::from("TTTT")];
-        let mut opts = build_opts(&dir, &seqs, &pattern, false, None, String::from(".fq"));
+        let mut opts = build_opts(
+            &dir,
+            &seqs,
+            &pattern,
+            false,
+            Vec::new(),
+            String::from(".fq"),
+        );
 
         opts.paired = paired;
         opts.invert_match = invert_match;
@@ -857,7 +1004,7 @@ pub mod tests {
         let dir = TempDir::new().unwrap();
         let seqs = vec![vec!["GGGG", "TTTT"], vec!["AAAA", "CCCC"]];
 
-        let mut opts = build_opts(&dir, &seqs, &pattern, true, None, String::from(".fq"));
+        let mut opts = build_opts(&dir, &seqs, &pattern, true, Vec::new(), String::from(".fq"));
 
         opts.fixed_strings = fixed_strings;
         let _result = fqgrep_from_opts(&opts);
@@ -879,7 +1026,14 @@ pub mod tests {
         ];
 
         let test_pattern = vec![String::from("A")];
-        let mut opts_test = build_opts(&dir, &seqs, &test_pattern, true, None, String::from(".fq"));
+        let mut opts_test = build_opts(
+            &dir,
+            &seqs,
+            &test_pattern,
+            true,
+            Vec::new(),
+            String::from(".fq"),
+        );
 
         opts_test.paired = true;
         let _num_matches = fqgrep_from_opts(&opts_test);
@@ -900,7 +1054,14 @@ pub mod tests {
         ];
 
         let test_pattern = vec![String::from("^G")];
-        let mut opts_test = build_opts(&dir, &seqs, &test_pattern, true, None, String::from(".fq"));
+        let mut opts_test = build_opts(
+            &dir,
+            &seqs,
+            &test_pattern,
+            true,
+            Vec::new(),
+            String::from(".fq"),
+        );
 
         // Test pattern from file
         let result = fqgrep_from_opts(&opts_test);
@@ -931,7 +1092,7 @@ pub mod tests {
 
         let test_pattern = vec![String::from("^G")];
 
-        let opts = build_opts(&dir, &seqs, &test_pattern, true, None, extension);
+        let opts = build_opts(&dir, &seqs, &test_pattern, true, Vec::new(), extension);
         let result = fqgrep_from_opts(&opts);
         assert_eq!(result.unwrap(), expected);
     }
@@ -952,7 +1113,7 @@ pub mod tests {
     ) {
         let dir = TempDir::new().unwrap();
         let seqs = vec![vec!["GTCAGC"], vec!["AGTGCG"], vec!["GGGTCTG"]];
-        let mut opts = build_opts(&dir, &seqs, &pattern, true, None, String::from(".fq"));
+        let mut opts = build_opts(&dir, &seqs, &pattern, true, Vec::new(), String::from(".fq"));
         opts.fixed_strings = fixed_strings;
         assert_eq!(fqgrep(&opts), expected);
     }
