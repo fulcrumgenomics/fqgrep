@@ -99,6 +99,8 @@ impl FastqWriter {
         output_type: OutputType,
         output: Vec<PathBuf>,
     ) -> Self {
+        type OptionWriter = Option<Box<dyn Write>>;
+
         // TODO: try making this unbounded
         let (tx, rx): (
             Sender<Vec<FastqOutputRecord>>,
@@ -106,7 +108,7 @@ impl FastqWriter {
         ) = bounded(WRITER_CHANNEL_SIZE);
 
         std::thread::spawn(move || {
-            let (mut r1_writer, mut r2_writer): (Option<Box<dyn Write>>, Option<Box<dyn Write>>) =
+            let (mut r1_writer, mut r2_writer): (OptionWriter, OptionWriter) =
                 {
                     if count {
                         (None, None)
