@@ -175,9 +175,6 @@ impl FastqWriter {
                                 }
                             }
                         }
-
-                        // fastq::write_to(&mut *writer, &read.head, &read.seq, &read.qual)
-                        //     .expect("failed writing read");
                     }
                 }
             }
@@ -970,6 +967,7 @@ pub mod tests {
         let dir = TempDir::new().unwrap();
         let seqs = vec![vec!["GGGG", "GGGG"], vec!["AAAA", "CCCC"]];
         let pattern = vec![String::from("TTTT")];
+
         let mut opts = build_opts(
             &dir,
             &seqs,
@@ -985,6 +983,71 @@ pub mod tests {
 
         let result = fqgrep_from_opts(&opts);
         assert_eq!(result.unwrap(), expected);
+    }
+
+    fn slurp_fastq(path: &PathBuf) -> Vec<OwnedRecord> {
+        let handle = File::open(&path).unwrap();
+
+        // Wrap it in a buffer
+        let buf_handle = BufReader::with_capacity(BUFSIZE, handle);
+        // Maybe wrap it in a decompressor
+        let maybe_decoder_handle = {
+            if is_gzip_path(&path) {
+                Box::new(MultiGzDecoder::new(buf_handle)) as Box<dyn Read>
+            } else {
+                Box::new(buf_handle) as Box<dyn Read>
+            }
+        };
+        // Open a FASTQ reader, get an iterator over the records, and chunk them
+        fastq::Reader::with_capacity(maybe_decoder_handle, BUFSIZE)
+            .into_records()
+            .map(|r| r.expect("Error reading"))
+            .collect::<Vec<_>>()
+    }
+
+    #[rstest]
+    fn test_paired_outputs() {
+        let dir: TempDir = TempDir::new().unwrap();
+        let seqs = vec![
+            //   both    r2      r1      neither
+            vec!["GGGG", "AAAA", "AGGG", "TGCA"],
+            vec!["GGGG", "GGGA", "CCCC", "ACGT"],
+        ];
+        let pattern = vec![String::from("GGG")];
+        let mut opts = build_opts(
+            &dir,
+            &seqs,
+            &pattern,
+            false,
+            Vec::new(),
+            String::from(".fq"),
+        );
+
+        let r1_output = dir.path().join("out.r1.fq");
+        let r2_output = dir.path().join("out.r2.fq");
+
+        opts.paired = true;
+        opts.invert_match = false;
+        opts.reverse_complement = false;
+        opts.output = vec![r1_output, r2_output];
+        opts.count = false;
+
+        let result = fqgrep_from_opts(&opts);
+        assert_eq!(result.unwrap(), 3);
+
+        // Check the output FASTQs
+        let r1_records = slurp_fastq(&opts.output[0]);
+        let r2_records = slurp_fastq(&opts.output[1]);
+        assert_eq!(r1_records.len(), 3);
+        assert_eq!(r2_records.len(), 3);
+        for (i, rec) in r1_records.iter().enumerate() {
+            let seq: String = String::from_utf8_lossy(rec.seq()).to_string();
+            assert_eq!(seq, seqs[0][i]);
+        }
+        for (i, rec) in r2_records.iter().enumerate() {
+            let seq: String = String::from_utf8_lossy(rec.seq()).to_string();
+            assert_eq!(seq, seqs[1][i]);
+        }
     }
 
     // ############################################################################################
