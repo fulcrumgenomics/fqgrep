@@ -65,33 +65,66 @@ pub mod built_info {
     }
 }
 
+/// If the `OwnedRecord` is the first of pair or fragment (`FirstOfPair`), or second of pair
+/// (`SecondOfPair`).  Used to determine to which FASTQ writer the record should be written
+/// when the output is paired (i.e. R1 and R2 output FASTQs).
 #[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RecordType {
+    /// First of pair or fragment.
     #[default]
     FirstOfPair,
+    /// Second of pair
     SecondOfPair,
 }
 
+/// Specifies how to output the matched records.
 #[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OutputType {
+    /// The output is an interleaved FASTQ.  For paired end output, this will interleave R1 and R2.
     #[default]
     Interleaved,
+    /// The output is all fragment records.  There are no paired end records.
     Fragment,
+    /// The output is written to two seperate FASTQs, one for the first of pair reads and one for
+    /// the second of pair reads.
     Paired,
 }
 
+/// The matching FASTQ records to write to the output.  The `RecordType` determines to which FASTQ
+/// the record should be written when `tpe` is `OutputType::Paired`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct FastqOutputRecord {
     pub record: OwnedRecord,
     pub tpe: RecordType,
 }
 
+/// The FASTQ writer that wraps an underlying writer in a thread.  Uses a bounded channel to
+/// send records to the underlying writer.
 struct FastqWriter {
     tx: Sender<Vec<FastqOutputRecord>>,
     lock: Mutex<()>,
 }
 
 impl FastqWriter {
+    /// Creates a new `FastqWriter` that spanws an underlying thread(s) for writing.
+    ///
+    /// If `output` is empty, then `output_type` must not be `OutputType::Paired`.  The output will
+    /// be written to standard output, with paired end records interleaved.
+    ///
+    /// If `output` has length one, then the above must also be true, except the output will be
+    /// written to the provided path.
+    ///  
+    /// If `output` has length two, then the `output_type` must be `OutputType::Paired`.  The
+    /// output will be written to the two separate FASTQs, one for the first of pair reads and one
+    /// for the second of pair reads.  `paired` must be `true` in this case.
+    ///
+    /// Arguments:
+    /// - `count_tx`: the channel to send the total number of matches found upon termination
+    /// - `count`: true to only send the count to the count channel, false to write to output FASTQs
+    /// - `paired`: true if the input is paired end, false if the input is all fragment records
+    /// - `output_type`: the type of output to write to.  For paired end input, this determines if
+    ///   the output is interleaved (a single FASTQ output) or split between R1 and R2 FASTQ
+    ///   output.
     fn new(
         count_tx: Sender<usize>,
         count: bool,
