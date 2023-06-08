@@ -124,7 +124,7 @@ impl FastqWriter {
                         (writer, None)
                     } else if output.len() == 2 {
                         assert!(output_type == OutputType::Paired);
-                        assert!(!paired);
+                        assert!(paired);
                         let w1: Option<Box<dyn Write>> = Some(Box::new(BufWriter::with_capacity(
                             BUFSIZE,
                             File::create(&output[0]).unwrap(),
