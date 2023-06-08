@@ -245,7 +245,6 @@ fn spawn_reader(
     record_type: Option<RecordType>,
     decompress: bool,
 ) -> Receiver<Vec<FastqOutputRecord>> {
-    // TODO: Change these from Sender<Vec<(FirstOfPair, OwnedRecord)>>...
     let (tx, rx) = bounded(READER_CHANNEL_SIZE);
     std::thread::spawn(move || {
         // Open the file or standad input
