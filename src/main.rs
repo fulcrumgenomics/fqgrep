@@ -24,7 +24,7 @@ use std::{
 };
 use structopt::clap::arg_enum;
 use structopt::{clap::AppSettings, StructOpt};
-use zstd::stream::{Decoder};
+use zstd::stream::Decoder;
 
 /// The number of reads in a chunk
 const CHUNKSIZE: usize = 5000; // * num_cpus::get();
@@ -142,12 +142,12 @@ fn spawn_reader(file: PathBuf, decompress: bool) -> Receiver<Vec<OwnedRecord>> {
         // Maybe wrap it in a decompressor
         let maybe_decoder_handle = {
             let is_gzip = is_gzip_path(&file) || (!is_fastq_path(&file) && decompress);
-			let is_zstd = is_zstd_path(&file);
+            let is_zstd = is_zstd_path(&file);
             if is_gzip {
                 Box::new(MultiGzDecoder::new(buf_handle)) as Box<dyn Read>
             } else if is_zstd {
-				Box::new(Decoder::new(buf_handle).unwrap()) as Box<dyn Read>
-			} else {
+                Box::new(Decoder::new(buf_handle).unwrap()) as Box<dyn Read>
+            } else {
                 Box::new(buf_handle) as Box<dyn Read>
             }
         };

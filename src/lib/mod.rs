@@ -70,7 +70,7 @@ const ZSTD_EXTENSIONS: [&str; 2] = ["zst", "zst"];
 
 /// Returns true if the path ends with a recognized ZSTD file extension
 pub fn is_zstd_path<P: AsRef<Path>>(p: &P) -> bool {
-	is_path_with_extension(p, ZSTD_EXTENSIONS)
+    is_path_with_extension(p, ZSTD_EXTENSIONS)
 }
 
 /// The set of file extensions to treat as FASTQ
