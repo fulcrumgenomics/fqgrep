@@ -64,6 +64,15 @@ pub fn is_gzip_path<P: AsRef<Path>>(p: &P) -> bool {
     is_path_with_extension(p, GZIP_EXTENSIONS)
 }
 
+/// The set of file extensions to treat as ZSTD compressed
+/// The second extension is redundant yes, only for is_path_with_extension()
+const ZSTD_EXTENSIONS: [&str; 2] = ["zst", "zst"];
+
+/// Returns true if the path ends with a recognized ZSTD file extension
+pub fn is_zstd_path<P: AsRef<Path>>(p: &P) -> bool {
+	is_path_with_extension(p, ZSTD_EXTENSIONS)
+}
+
 /// The set of file extensions to treat as FASTQ
 const FASTQ_EXTENSIONS: [&str; 2] = ["fastq", "fq"];
 
@@ -107,6 +116,24 @@ pub mod tests {
         let result = is_gzip_path(&file_path);
         assert_eq!(result, expected);
     }
+
+    // ############################################################################################
+    // Tests is_zstd_path()
+    // ############################################################################################
+
+    #[rstest]
+    #[case("test_fastq.fq", false)] // .fq is invalid zstd
+    #[case("test_fastq.fq.gz", false)] // .fq.gz is invalid zstd
+    #[case("test_fastq.fq.bgz", false)] // .fq.bgz is invalid zstd
+    #[case("test_fastq.fq.tar", false)] // .fq.tar is invalid zstd
+    #[case("test_fastq.fq.zst", true)] // .fq.zst is valid zstd
+    fn test_is_zstd_path(#[case] file_name: &str, #[case] expected: bool) {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join(file_name);
+        let result = is_zstd_path(&file_path);
+        assert_eq!(result, expected);
+    }
+
     // ############################################################################################
     // Tests is_fastq_path()
     // ############################################################################################
