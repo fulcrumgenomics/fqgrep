@@ -5,8 +5,8 @@ use anyhow::{bail, ensure, Context, Result};
 use env_logger::Env;
 use flate2::bufread::MultiGzDecoder;
 use flume::{bounded, Receiver, Sender};
+use fgoxide::io::Io;
 use fqgrep_lib::matcher::{validate_fixed_pattern, Matcher, MatcherFactory, MatcherOpts};
-use fqgrep_lib::{is_fastq_path, is_gzip_path};
 use gzp::BUFSIZE;
 use isatty::stdout_isatty;
 use itertools::{self, izip, Itertools};
@@ -24,6 +24,7 @@ use std::{
 };
 use structopt::clap::arg_enum;
 use structopt::{clap::AppSettings, StructOpt};
+use zstd::stream::Decoder as ZstdDecoder;
 
 /// The number of reads in a chunk
 const CHUNKSIZE: usize = 5000; // * num_cpus::get();
@@ -127,7 +128,7 @@ impl FastqWriter {
 fn spawn_reader(file: PathBuf, decompress: bool) -> Receiver<Vec<OwnedRecord>> {
     let (tx, rx) = bounded(READER_CHANNEL_SIZE);
     std::thread::spawn(move || {
-        // Open the file or standad input
+        // Open the file or standard input
         let raw_handle = if file.as_os_str() == "-" {
             Box::new(std::io::stdin()) as Box<dyn Read>
         } else {
@@ -140,9 +141,12 @@ fn spawn_reader(file: PathBuf, decompress: bool) -> Receiver<Vec<OwnedRecord>> {
         let buf_handle = BufReader::with_capacity(BUFSIZE, raw_handle);
         // Maybe wrap it in a decompressor
         let maybe_decoder_handle = {
-            let is_gzip = is_gzip_path(&file) || (!is_fastq_path(&file) && decompress);
+            let is_gzip = Io::is_gzip_path(&file) || (!Io::is_fastq_path(&file) && decompress);
+            let is_zstd = Io::is_zstd_path(&file);
             if is_gzip {
                 Box::new(MultiGzDecoder::new(buf_handle)) as Box<dyn Read>
+            } else if is_zstd {
+                Box::new(ZstdDecoder::new(buf_handle).unwrap()) as Box<dyn Read>
             } else {
                 Box::new(buf_handle) as Box<dyn Read>
             }
@@ -562,7 +566,7 @@ pub mod tests {
     ///
     /// # Examples
     /// if - sequences = vec![vec!["AAGTCTGAATCCATGGAAAGCTATTG", "GGGTCTGAATCCATGGAAAGCTATTG"], vec!["AAGTCTGAATCCATGGAAAGCTATTG", "GGGTCTGAATCCATGGAAAGCTATTG"]]
-    /// write_fastq() will return Vec</temp/path/to/first.fa, /temp/path/to/second.fq> where 'paths' are Strings.
+    /// write_fastq() will return Vec</temp/path/to/first.fq, /temp/path/to/second.fq> where 'paths' are Strings.
     fn write_fastq(
         temp_dir: &TempDir,
         sequences_per_fastq: &Vec<Vec<&str>>,
@@ -907,7 +911,7 @@ pub mod tests {
     }
 
     // ############################################################################################
-    // Tests that correct match count is returned from .fq, .fastq, .fq.gz, and .fq.bgz
+    // Tests that correct match count is returned from .fq, .fastq, .fq.gz, .fq.bgz, and .fq.zst
     // ############################################################################################
     // Three matches are found from all file types
     #[rstest]
@@ -915,6 +919,7 @@ pub mod tests {
     #[case(String::from(".fastq"), 3)]
     #[case(String::from(".fq.gz"), 3)]
     #[case(String::from(".fq.bgz"), 3)]
+    #[case(String::from(".fq.zst"), 3)]
     fn test_fastq_compression(#[case] extension: String, #[case] expected: usize) {
         let dir = TempDir::new().unwrap();
         let seqs = vec![

@@ -8,7 +8,7 @@
 pub mod color;
 pub mod matcher;
 use lazy_static::lazy_static;
-use std::{borrow::Borrow, path::Path};
+use std::{borrow::Borrow};
 
 pub const DNA_BASES: [u8; 5] = *b"ACGTN";
 pub const IUPAC_BASES: [u8; 15] = *b"AGCTYRWSKMDVHBN";
@@ -44,33 +44,6 @@ where
         .collect()
 }
 
-/// Returns true if the path ends with a recognized GZIP file extension
-fn is_path_with_extension<P: AsRef<Path>>(p: &P, extensions: [&str; 2]) -> bool {
-    if let Some(ext) = p.as_ref().extension() {
-        match ext.to_str() {
-            Some(x) => extensions.contains(&x),
-            None => false,
-        }
-    } else {
-        false
-    }
-}
-
-/// The set of file extensions to treat as GZIPPED
-const GZIP_EXTENSIONS: [&str; 2] = ["gz", "bgz"];
-
-/// Returns true if the path ends with a recognized GZIP file extension
-pub fn is_gzip_path<P: AsRef<Path>>(p: &P) -> bool {
-    is_path_with_extension(p, GZIP_EXTENSIONS)
-}
-
-/// The set of file extensions to treat as FASTQ
-const FASTQ_EXTENSIONS: [&str; 2] = ["fastq", "fq"];
-
-/// Returns true if the path ends with a recognized FASTQ file extension
-pub fn is_fastq_path<P: AsRef<Path>>(p: &P) -> bool {
-    is_path_with_extension(p, FASTQ_EXTENSIONS)
-}
 
 // Tests
 #[cfg(test)]
@@ -78,7 +51,6 @@ pub mod tests {
     use crate::*;
     use rstest::rstest;
     use std::str;
-    use tempfile::TempDir;
 
     // ############################################################################################
     // Tests reverse_complement()
@@ -91,34 +63,5 @@ pub mod tests {
         let result = reverse_complement(seq.as_bytes());
         let string_result = str::from_utf8(&result).unwrap();
         assert_eq!(&string_result, &expected);
-    }
-
-    // ############################################################################################
-    // Tests is_gzip_path()
-    // ############################################################################################
-
-    #[rstest]
-    #[case("test_fastq.fq.gz", true)] // .fq.gz is valid gzip
-    #[case("test_fastq.fq.bgz", true)] // .fq.bgz is valid gzip
-    #[case("test_fastq.fq.tar", false)] // .fq.tar is invalid gzip
-    fn test_is_gzip_path(#[case] file_name: &str, #[case] expected: bool) {
-        let dir = TempDir::new().unwrap();
-        let file_path = dir.path().join(file_name);
-        let result = is_gzip_path(&file_path);
-        assert_eq!(result, expected);
-    }
-    // ############################################################################################
-    // Tests is_fastq_path()
-    // ############################################################################################
-
-    #[rstest]
-    #[case("test_fastq.fq", true)] // .fq is valid fastq
-    #[case("test_fastq.fastq", true)] // .fastq is valid fastq
-    #[case("test_fastq.sam", false)] // .sam is invalid fastq
-    fn test_is_fastq_path(#[case] file_name: &str, #[case] expected: bool) {
-        let dir = TempDir::new().unwrap();
-        let file_path = dir.path().join(file_name);
-        let result = is_fastq_path(&file_path);
-        assert_eq!(result, expected);
     }
 }
