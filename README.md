@@ -66,7 +66,7 @@ ARGS:
 ## Example Invocation
 
 ```console
-fqgrep --progress --threads 16 --color always <PATTERN> <TEST_1.fastq> <TEST_2.fq> <TEST_3>.fq.gz <TEST_3>.fastq.gz ...
+fqgrep --progress --threads 16 --color always <PATTERN> <TEST_1.fastq> <TEST_2.fq> <TEST_3.fq.gz> <TEST_4.fastq.gz> ...
 ```
 
 ## Help
