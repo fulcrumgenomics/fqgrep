@@ -31,6 +31,7 @@ bitvec = "1.0.1"
 bstr = "0.2.17"
 csv = "1.1.6"
 env_logger = "0.9.0"
+fgoxide = { git = "https://github.com/kockan/fgoxide" }
 flate2 = {version = "1.0.22", default-features = false, features = ["zlib-ng-compat"]}
 flume = "0.10.9"
 gzp = "0.9.1"
@@ -47,12 +48,14 @@ regex = "1.6.0"
 seq_io = "0.3.1"
 serde = {version = "1.0.130", features = ["derive"]}
 structopt = "0.3.23"
+zstd = "0.12.4"
 
 [build-dependencies]
 built = {version ="0.5.1", features = ["git2"]}
 
 [dev-dependencies]
-fgoxide = "0.1.3"
+# Until fgoxide gets merged(?) to the original repo
+fgoxide = { git = "https://github.com/kockan/fgoxide" }
 rstest = "0.12.0"
 seq_io = "0.3.1"
 tempfile = "3"
