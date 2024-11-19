@@ -2,11 +2,14 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use anyhow::{bail, ensure, Context, Result};
+use bio::data_structures::bitenc::BitEnc;
 use env_logger::Env;
 use flate2::bufread::MultiGzDecoder;
 use flume::{bounded, Receiver, Sender};
 use fqgrep_lib::matcher::{validate_fixed_pattern, Matcher, MatcherFactory, MatcherOpts};
-use fqgrep_lib::{is_fastq_path, is_gzip_path};
+use fqgrep_lib::{
+    encode, expand_iupac_fixed_pattern, expand_iupac_regex, is_fastq_path, is_gzip_path,
+};
 use gzp::BUFSIZE;
 use isatty::stdout_isatty;
 use itertools::{self, izip, Itertools};
@@ -16,6 +19,7 @@ use proglog::{CountFormatterKind, ProgLog, ProgLogBuilder};
 use rayon::prelude::*;
 use seq_io::fastq::{self, OwnedRecord, Record};
 use std::process::ExitCode;
+use std::str;
 use std::{
     fs::File,
     io::{BufRead, BufReader, BufWriter, Read, Write},
@@ -163,10 +167,20 @@ fn spawn_reader(file: PathBuf, decompress: bool) -> Receiver<Vec<OwnedRecord>> {
 arg_enum! {
     #[derive(PartialEq, Debug, Clone)]
     enum Color {
-    Never,
-    Always,
-    Auto,
+        Never,
+        Always,
+        Auto,
+    }
 }
+
+arg_enum! {
+    #[derive(PartialEq, Debug, Clone)]
+    enum IupacOption {
+        Never,
+        Expand,
+        Regex,
+        BitMask,
+    }
 }
 
 /// The fqgrep utility searches any given input FASTQ files, selecting records whose bases match
@@ -211,7 +225,7 @@ struct Opts {
     threads: usize,
 
     // TODO: support GREP_COLOR(S) (or FQGREP_COLOR(S)) environment variables
-    /// Mark up the matching text.  The possible values of when are “never”, “always” and “auto”.
+    /// Mark up the matching text.  The possible values are “never”, “always” and “auto”.
     #[structopt(long = "color", default_value = "never")]
     color: Color,
 
@@ -258,6 +272,15 @@ struct Opts {
     #[structopt(long)]
     progress: bool,
 
+    /// Determine if IUPAC codes should be treated specially when `-F/--fixed-strings` is
+    /// specified.  If `Never` is given, patterns are left as-is.  If `Expand` is given, then
+    /// the pattern (or patterns) will be replaced with fixed strings without IUPAC codes, for
+    /// example, `GATK` will be expanded to two fixed patterns `GATG` and `GATT`.  If `Regex` is
+    /// given, then the pattern (or patterns) will be replaced with regular expressions without
+    /// IUPA  codes, for example, `GATK` will be changed to the regular expression `GAT[GT]`.
+    #[structopt(long, default_value = "never")]
+    iupac: IupacOption,
+
     /// The first argument is the pattern to match, with the remaining arguments containing the
     /// files to match.  If `-e` is given, then all the arguments are files to match.
     /// Use standard input if either no files are given or `-` is given.
@@ -280,7 +303,7 @@ fn read_patterns(file: &PathBuf) -> Result<Vec<String>> {
     Ok(v)
 }
 
-/// Runs fqgrep and converts Option<u8> to ExitCode
+/// Runs fqgrep and converts Option<u8> to `ExitCode`
 ///
 /// Set the exit code:
 /// - exit code SUCCESS if there were matches
@@ -296,12 +319,12 @@ fn main() -> ExitCode {
     }
 }
 
-/// Runs fqgrep_from_opts and returns None upon success and an error number if error or zero matches
+/// Runs `fqgrep_from_opts` and returns None upon success and an error number if error or zero matches
 ///
 /// - None if there were matches
 /// - 1 if there were no matches
-/// - 2 if fqgrep_from_opts returned an error
-/// - 101 if fqgrep_from_opts panicked
+/// - 2 if `fqgrep_from_opts` returned an error
+/// - 101 if `fqgrep_from_opts` panicked
 fn fqgrep(opts: &Opts) -> Option<u8> {
     let outer = std::panic::catch_unwind(|| fqgrep_from_opts(opts));
     match outer {
@@ -320,9 +343,32 @@ fn fqgrep(opts: &Opts) -> Option<u8> {
     }
 }
 
+fn expand_iupac(opts: &mut Opts, pattern: &str, bitencs: &mut Vec<BitEnc>) {
+    match opts.iupac {
+        IupacOption::Never => opts.regexp.push(pattern.to_string()),
+        IupacOption::Expand => {
+            let mut expanded = Vec::new();
+            expand_iupac_fixed_pattern(pattern.as_bytes(), 0, &[], &mut expanded);
+            for exp in &expanded {
+                let string: String = str::from_utf8(exp).unwrap().to_string();
+                opts.regexp.push(string);
+            }
+        }
+        IupacOption::Regex => {
+            opts.fixed_strings = false;
+            let string: String = str::from_utf8(&expand_iupac_regex(pattern.as_bytes()))
+                .unwrap()
+                .to_string();
+            opts.regexp.push(string);
+        }
+        IupacOption::BitMask => bitencs.push(encode(pattern.as_bytes())),
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
     let mut opts = opts.clone();
+
     // Add patterns from a file if given
     if let Some(file) = &opts.file {
         for pattern in read_patterns(file)? {
@@ -331,8 +377,8 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
     }
 
     // Inspect the positional arguments to extract a fixed pattern
-    let (pattern, mut files): (Option<String>, Vec<PathBuf>) = {
-        let (pattern, file_strings): (Option<String>, Vec<String>) = if opts.regexp.is_empty() {
+    let mut files: Vec<PathBuf> = {
+        let file_strings: Vec<String> = if opts.regexp.is_empty() {
             // No patterns given by -e, so assume the first positional argument is the pattern and
             // the rest are files
             ensure!(
@@ -340,22 +386,22 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
                 "Pattern must be given with -e or as the first positional argument "
             );
             let files = opts.args.iter().skip(1).cloned().collect();
-            (Some(opts.args[0].clone()), files)
+            opts.regexp.push(opts.args[0].clone());
+            files
         } else {
             // Patterns given by -e, so assume all positional arguments are files
-            (None, opts.args.clone())
+            opts.args.clone()
         };
 
         // Convert file strings into paths
-        let files = file_strings
+        file_strings
             .iter()
             .map(|s| {
                 PathBuf::from_str(s)
                     .with_context(|| format!("Cannot create a path from: {}", s))
                     .unwrap()
             })
-            .collect();
-        (pattern, files)
+            .collect()
     };
 
     // Ensure that if multiple files are given, its a multiple of two.
@@ -366,16 +412,33 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
         );
     }
 
+    if opts.regexp.is_empty() {
+        bail!("A pattern must be given as a positional argument or with -e/--regexp")
+    }
+
+    // Determine if we should use fixed-string matching, and if so, validate all values are actually
+    // fixed strings
+    opts.fixed_strings = opts.fixed_strings
+        || opts
+            .regexp
+            .iter()
+            .all(|pattern| validate_fixed_pattern(pattern).is_ok());
+
     // Validate the fixed string pattern, if fixed-strings are specified
+    let mut bitencs: Vec<BitEnc> = Vec::new();
     if opts.fixed_strings {
-        if let Some(pattern) = &pattern {
-            validate_fixed_pattern(pattern)?;
-        } else if !opts.regexp.is_empty() {
+        if opts.regexp.is_empty() {
+            bail!("Bug: should never reach here")
+        }
+        let patterns = opts.regexp.clone();
+        opts.regexp.clear();
+        for pattern in &patterns {
+            expand_iupac(&mut opts, pattern, &mut bitencs);
+        }
+        if opts.fixed_strings {
             for pattern in &opts.regexp {
                 validate_fixed_pattern(pattern)?;
             }
-        } else {
-            bail!("A pattern must be given as a positional argument or with -e/--regexp")
         }
     }
 
@@ -402,8 +465,11 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
     };
 
     // The matcher used in the primary search
+    if opts.regexp.is_empty() && bitencs.is_empty() {
+        bail!("Bug: should never reach here")
+    }
     let matcher: Box<dyn Matcher + Sync + Send> =
-        MatcherFactory::new_matcher(&pattern, opts.fixed_strings, &opts.regexp, match_opts);
+        MatcherFactory::new_matcher(opts.fixed_strings, &opts.regexp, match_opts, &bitencs);
 
     // The thread pool from which threads are spanwed.
     let pool = rayon::ThreadPoolBuilder::new()
@@ -650,20 +716,14 @@ pub mod tests {
             if pattern_from_file {
                 (vec![], Some(write_pattern(&dir, &regexp)))
             } else {
-                (regexp.to_vec(), None)
+                (regexp.clone(), None)
             }
         };
 
-        let return_opts = Opts {
+        Opts {
             threads: 4,
             color: Color::Never,
-            count: {
-                if &output == &None {
-                    true
-                } else {
-                    false
-                }
-            },
+            count: { output == None },
             regexp: pattern_string,
             fixed_strings: false,
             file: pattern_file,
@@ -672,10 +732,10 @@ pub mod tests {
             paired: false,
             reverse_complement: false,
             progress: true,
-            args: fq_path.to_vec(),
-            output: output,
-        };
-        return_opts
+            args: fq_path,
+            iupac: IupacOption::Never,
+            output,
+        }
     }
 
     /// Returns sequences from fastq

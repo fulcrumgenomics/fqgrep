@@ -5,6 +5,8 @@
     clippy::missing_errors_doc,
     clippy::module_name_repetitions
 )]
+use bio::data_structures::bitenc::BitEnc;
+
 pub mod color;
 pub mod matcher;
 use lazy_static::lazy_static;
@@ -25,6 +27,33 @@ lazy_static! {
             comp[a as usize + 32] = b + 32;  // lowercase variants
         }
         comp
+    };
+
+    pub static ref BASE_A: usize = 1;
+    pub static ref BASE_C: usize = 2;
+    pub static ref BASE_G: usize = 4;
+    pub static ref BASE_T: usize = 8;
+
+    pub static ref IUPAC_MASKS: [u8; 256] = {
+        let mut masks = [0; 256];
+        let (a, c, g, t) = (1, 2, 4, 8);
+        masks['A' as usize] = a;
+        masks['C' as usize] = c;
+        masks['G' as usize] = g;
+        masks['T' as usize] = t;
+        masks['U' as usize] = t;
+        masks['M' as usize] = a | c;
+        masks['R' as usize] = a | g;
+        masks['W' as usize] = a | t;
+        masks['S' as usize] = c | g;
+        masks['Y' as usize] = c | t;
+        masks['K' as usize] = g | t;
+        masks['V' as usize] = a | c | g;
+        masks['H' as usize] = a | c | t;
+        masks['D' as usize] = a | g | t;
+        masks['B' as usize] = c | g | t;
+        masks['N' as usize] = a | c | g | t;
+        masks
     };
 }
 
@@ -70,6 +99,57 @@ const FASTQ_EXTENSIONS: [&str; 2] = ["fastq", "fq"];
 /// Returns true if the path ends with a recognized FASTQ file extension
 pub fn is_fastq_path<P: AsRef<Path>>(p: &P) -> bool {
     is_path_with_extension(p, FASTQ_EXTENSIONS)
+}
+
+/// Expands the pattern containing IUPAC bases into one or more patterns.   For example,
+/// GATK will be expanded to two fixed patterns GATG and GATT.
+pub fn expand_iupac_fixed_pattern(
+    pattern: &[u8],
+    pattern_index: usize,
+    prefix: &[u8],
+    expanded: &mut Vec<Vec<u8>>,
+) {
+    if pattern_index == pattern.len() {
+        // no more bases in the pattern, append the prefix, and recurse
+        expanded.push(prefix.to_vec());
+    } else {
+        let mask = IUPAC_MASKS[pattern[pattern_index] as usize];
+        for base in DNA_BASES.iter().take(4) {
+            if (IUPAC_MASKS[*base as usize] & mask) != 0 {
+                let new_prefix = [prefix, &[*base]].concat();
+                expand_iupac_fixed_pattern(pattern, pattern_index + 1, &new_prefix, expanded);
+            }
+        }
+    }
+}
+
+pub fn expand_iupac_regex(pattern: &[u8]) -> Vec<u8> {
+    let mut new_pattern: Vec<u8> = Vec::new();
+    for base in pattern {
+        let mask = IUPAC_MASKS[*base as usize];
+        let mut bases = Vec::new();
+        for base in DNA_BASES.iter().take(4) {
+            if (IUPAC_MASKS[*base as usize] & mask) != 0 {
+                bases.push(*base);
+            }
+        }
+        if bases.len() == 1 {
+            new_pattern.push(*base);
+        } else {
+            new_pattern.push(b'[');
+            new_pattern.extend_from_slice(&bases);
+            new_pattern.push(b']');
+        }
+    }
+    new_pattern
+}
+
+pub fn encode(bases: &[u8]) -> BitEnc {
+    let mut vec = BitEnc::with_capacity(4, bases.len());
+    for base in bases {
+        vec.push(IUPAC_MASKS[*base as usize]);
+    }
+    vec
 }
 
 // Tests
@@ -120,5 +200,37 @@ pub mod tests {
         let file_path = dir.path().join(file_name);
         let result = is_fastq_path(&file_path);
         assert_eq!(result, expected);
+    }
+
+    #[rstest]
+    #[case("GATTACA", vec!["GATTACA"])]
+    #[case("GATMACA", vec!["GATAACA", "GATCACA"])]
+    #[case("GRTBANA", vec!["GATCAAA", "GATCACA", "GATCAGA", "GATCATA", "GATGAAA", "GATGACA", "GATGAGA", "GATGATA", "GATTAAA", "GATTACA", "GATTAGA", "GATTATA", "GGTCAAA", "GGTCACA", "GGTCAGA", "GGTCATA", "GGTGAAA", "GGTGACA", "GGTGAGA", "GGTGATA", "GGTTAAA", "GGTTACA", "GGTTAGA", "GGTTATA"])]
+    fn test_expand_iupac_fixed_pattern(#[case] pattern: &str, #[case] expected: Vec<&str>) {
+        let mut actual = Vec::new();
+        expand_iupac_fixed_pattern(pattern.as_bytes(), 0, &[], &mut actual);
+        let actual_strings: Vec<String> = actual
+            .iter()
+            .map(|bytes| str::from_utf8(bytes).unwrap().to_string())
+            .collect();
+        assert_eq!(actual_strings, expected);
+    }
+
+    #[rstest]
+    #[case("GATTACA", "GATTACA")]
+    #[case("GATMACA", "GAT[AC]ACA")]
+    #[case("GRTBANA", "G[AG]T[CGT]A[ACGT]A")]
+    fn test_expand_iupac_regex(#[case] pattern: &str, #[case] expected: &str) {
+        let expanded = expand_iupac_regex(pattern.as_bytes());
+        let actual = str::from_utf8(&expanded).unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    #[rstest]
+    fn test_encode() {
+        for base in IUPAC_BASES {
+            let actual: u8 = encode(&[base]).get(0).unwrap();
+            assert_eq!(actual, IUPAC_MASKS[base as usize]);
+        }
     }
 }
