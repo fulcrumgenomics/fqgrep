@@ -4,6 +4,7 @@ use std::ops::Range;
 use crate::color::{color_background, color_head};
 use crate::color::{COLOR_BACKGROUND, COLOR_BASES, COLOR_QUALS};
 use crate::reverse_complement;
+use crate::AMINO_ACIDS;
 use crate::DNA_BASES;
 use anyhow::{bail, Context, Result};
 use bstr::ByteSlice;
@@ -120,9 +121,18 @@ fn bases_colored(
 }
 
 /// Validates that a given FIXED pattern contains only valid DNA bases (ACGTN)
-pub fn validate_fixed_pattern(pattern: &str) -> Result<()> {
+pub fn validate_fixed_pattern(pattern: &str, protein: bool) -> Result<()> {
     for (index, base) in pattern.chars().enumerate() {
-        if !DNA_BASES.contains(&(base as u8)) {
+        if protein {
+            if !AMINO_ACIDS.contains(&(base as u8)) {
+                bail!(
+                    "Fixed pattern must contain only amino acids: {} .. [{}] .. {}",
+                    &pattern[0..index],
+                    &pattern[index..=index],
+                    &pattern[index + 1..],
+                )
+            }
+        } else if !DNA_BASES.contains(&(base as u8)) {
             bail!(
                 "Fixed pattern must contain only DNA bases: {} .. [{}] .. {}",
                 &pattern[0..index],
@@ -609,17 +619,31 @@ pub mod tests {
     // Tests validate_fixed_pattern()
     // ############################################################################################
 
-    #[test]
-    fn test_validate_fixed_pattern_is_ok() {
-        let pattern = "AGTGTGATG";
-        let result = validate_fixed_pattern(&pattern);
+    #[rstest]
+    #[case("AGTGTGATG", false)]
+    #[case("QRNQRNQRN", true)]
+    fn test_validate_fixed_pattern_is_ok(#[case] pattern: &str, #[case] protein: bool) {
+        let result = validate_fixed_pattern(&pattern, protein);
         assert!(result.is_ok())
     }
-    #[test]
-    fn test_validate_fixed_pattern_error() {
-        let pattern = "AXGTGTGATG";
-        let msg = String::from("Fixed pattern must contain only DNA bases: A .. [X] .. GTGTGATG");
-        let result = validate_fixed_pattern(&pattern);
+
+    #[rstest]
+    #[case(
+        "AXGTGTGATG",
+        false,
+        "Fixed pattern must contain only DNA bases: A .. [X] .. GTGTGATG"
+    )]
+    #[case(
+        "QRNQRNZQRN",
+        true,
+        "Fixed pattern must contain only amino acids: QRNQRN .. [Z] .. QRN"
+    )]
+    fn test_validate_fixed_pattern_error(
+        #[case] pattern: &str,
+        #[case] protein: bool,
+        #[case] msg: &str,
+    ) {
+        let result = validate_fixed_pattern(&pattern, protein);
         let inner = result.unwrap_err().to_string();
         assert_eq!(inner, msg);
     }

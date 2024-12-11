@@ -11,6 +11,7 @@ use lazy_static::lazy_static;
 use std::{borrow::Borrow, path::Path};
 
 pub const DNA_BASES: [u8; 5] = *b"ACGTN";
+pub const AMINO_ACIDS: [u8; 20] = *b"ARNDCEQGHILKMFPSTWYV";
 pub const IUPAC_BASES: [u8; 15] = *b"AGCTYRWSKMDVHBN";
 pub const IUPAC_BASES_COMPLEMENT: [u8; 15] = *b"TCGARYWSMKHBDVN";
 
