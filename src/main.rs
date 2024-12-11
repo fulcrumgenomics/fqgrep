@@ -258,6 +258,10 @@ struct Opts {
     #[structopt(long)]
     progress: bool,
 
+    /// The input files contain protein sequence (amino acids), not DNA sequence.
+    #[structopt(long)]
+    protein: bool,
+
     /// The first argument is the pattern to match, with the remaining arguments containing the
     /// files to match.  If `-e` is given, then all the arguments are files to match.
     /// Use standard input if either no files are given or `-` is given.
@@ -366,13 +370,17 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
         );
     }
 
+    if opts.protein && opts.reverse_complement {
+        bail!("--reverse-complement many not be used with --protein")
+    }
+
     // Validate the fixed string pattern, if fixed-strings are specified
     if opts.fixed_strings {
         if let Some(pattern) = &pattern {
-            validate_fixed_pattern(pattern)?;
+            validate_fixed_pattern(pattern, opts.protein)?;
         } else if !opts.regexp.is_empty() {
             for pattern in &opts.regexp {
-                validate_fixed_pattern(pattern)?;
+                validate_fixed_pattern(pattern, opts.protein)?;
             }
         } else {
             bail!("A pattern must be given as a positional argument or with -e/--regexp")
@@ -672,6 +680,7 @@ pub mod tests {
             paired: false,
             reverse_complement: false,
             progress: true,
+            protein: false,
             args: fq_path.to_vec(),
             output: output,
         };
@@ -796,6 +805,46 @@ pub mod tests {
         let sequence_match = expected_seq == return_sequences;
         assert_eq!(sequence_match, expected_bool);
     }
+    
+    // ############################################################################################
+    //Tests match with protein (not DNA!)
+    // ############################################################################################
+    #[rstest]
+    // fixed strings
+    #[case(vec!["A"], vec!["AAAA", "ATAT", "TATA", "AAAT", "TTTA"])] // unpaired: fixed string with multiple matches
+    #[case(vec!["Q"], vec!["QFPQFP"])] // unpaired: fixed string with one match
+    #[case(vec!["M"], vec![])] // unpaired: fixed string with no matches
+    // regex
+    #[case(vec!["^Q"], vec!["QFPQFP"])] // unpaired: regex with one match
+    #[case(vec!["^Q", "^F"], vec!["QFPQFP"])] // unpaired: regex set with two matches
+    #[case(vec!["^Q", "^A"], vec!["AAAA", "ATAT", "AAAT", "QFPQFP"])] // unpaired: regex set with two matches
+    #[case(vec!["^M", "^K"], vec![])] // unpaired: regex set with no matches
+    fn test_protein_ok(
+        #[case] pattern: Vec<&str>,
+        #[case] expected_seq: Vec<&str>,
+    ) {
+        let dir = TempDir::new().unwrap();
+        let seqs = vec![
+            vec!["AAAA", "TTTT", "ATAT", "TATA", "AAAT", "TTTA", "QFPQFP"],
+        ];
+        let out_path = dir.path().join(String::from("output.fq"));
+        let result_path = &out_path.clone();
+        let pattern = pattern.iter().map(|&s| s.to_owned()).collect::<Vec<_>>();
+        let mut opts = build_opts(
+            &dir,
+            &seqs,
+            &pattern,
+            true,
+            Some(out_path),
+            String::from(".fq"),
+        );
+
+        opts.protein = true;
+        let _result = fqgrep_from_opts(&opts);
+        let return_sequences = slurp_output(result_path.to_path_buf());
+
+        assert_eq!(return_sequences, expected_seq);
+    }
 
     // ############################################################################################
     // Tests two fastqs for 'TGGATTCAGACTT' which is only found once in the reverse complement
@@ -831,21 +880,52 @@ pub mod tests {
         let result = fqgrep_from_opts(&opts);
         assert_eq!(result.unwrap(), expected);
     }
+    
+    //
+    // ############################################################################################
+    // Tests that an error is returned when protein and reverse_complement are both present
+    // ############################################################################################
+    #[rstest]
+    #[should_panic(
+        expected = "called `Result::unwrap()` on an `Err` value: --reverse-complement many not be used with --protein"
+    )]
+    #[case()]
+    fn text_fails_with_protein_and_reverse_complement() {
+        let dir = TempDir::new().unwrap();
+        let seqs = vec![vec!["GGGG", "TTTT"], vec!["AAAA", "CCCC"]];
+        let pattern = vec![String::from("^G")];
+
+        let mut opts = build_opts(&dir, &seqs, &pattern, true, None, String::from(".fq"));
+
+        opts.protein = true;
+        opts.reverse_complement = true;
+        let _result = fqgrep_from_opts(&opts);
+        _result.unwrap();
+    }
 
     // ############################################################################################
-    // Tests that an error is returned when fixed_strings is true and regex is present
+    // Tests that an error is returned when fixed_strings is true for DNA and regex is present
     // ############################################################################################
     #[rstest]
     #[should_panic(
         expected = "called `Result::unwrap()` on an `Err` value: Fixed pattern must contain only DNA bases:  .. [^] .. G"
     )]
-    #[case(true, vec![String::from("^G")])] // panic with single regex
+    #[case(true, false, vec![String::from("^G")])] // panic with single regex
     #[should_panic(
         expected = "called `Result::unwrap()` on an `Err` value: Fixed pattern must contain only DNA bases:  .. [^] .. A"
     )]
-    #[case(true, vec![String::from("^A"),String::from("AA")])] // panic with combination of regex and fixed string
+    #[case(true, false, vec![String::from("^A"),String::from("AA")])] // panic with combination of regex and fixed string
+    #[should_panic(
+        expected = "called `Result::unwrap()` on an `Err` value: Fixed pattern must contain only amino acids:  .. [^] .. Q"
+    )]
+    #[case(true, true, vec![String::from("^Q")])] // panic with single regex
+    #[should_panic(
+        expected = "called `Result::unwrap()` on an `Err` value: Fixed pattern must contain only amino acids:  .. [^] .. Q"
+    )]
+    #[case(true, true, vec![String::from("^Q"),String::from("QQ")])] // panic with combination of regex and fixed string
     fn test_regexp_from_fixed_string_fails_with_regex(
         #[case] fixed_strings: bool,
+        #[case] protein: bool,
         #[case] pattern: Vec<String>,
     ) {
         let dir = TempDir::new().unwrap();
@@ -854,9 +934,11 @@ pub mod tests {
         let mut opts = build_opts(&dir, &seqs, &pattern, true, None, String::from(".fq"));
 
         opts.fixed_strings = fixed_strings;
+        opts.protein = protein;
         let _result = fqgrep_from_opts(&opts);
         _result.unwrap();
     }
+
     // ############################################################################################
     // Tests error is returned from main when three records are defined as paired
     // ############################################################################################
