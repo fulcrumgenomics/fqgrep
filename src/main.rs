@@ -805,7 +805,7 @@ pub mod tests {
         let sequence_match = expected_seq == return_sequences;
         assert_eq!(sequence_match, expected_bool);
     }
-    
+
     // ############################################################################################
     //Tests match with protein (not DNA!)
     // ############################################################################################
@@ -819,14 +819,11 @@ pub mod tests {
     #[case(vec!["^Q", "^F"], vec!["QFPQFP"])] // unpaired: regex set with two matches
     #[case(vec!["^Q", "^A"], vec!["AAAA", "ATAT", "AAAT", "QFPQFP"])] // unpaired: regex set with two matches
     #[case(vec!["^M", "^K"], vec![])] // unpaired: regex set with no matches
-    fn test_protein_ok(
-        #[case] pattern: Vec<&str>,
-        #[case] expected_seq: Vec<&str>,
-    ) {
+    fn test_protein_ok(#[case] pattern: Vec<&str>, #[case] expected_seq: Vec<&str>) {
         let dir = TempDir::new().unwrap();
-        let seqs = vec![
-            vec!["AAAA", "TTTT", "ATAT", "TATA", "AAAT", "TTTA", "QFPQFP"],
-        ];
+        let seqs = vec![vec![
+            "AAAA", "TTTT", "ATAT", "TATA", "AAAT", "TTTA", "QFPQFP",
+        ]];
         let out_path = dir.path().join(String::from("output.fq"));
         let result_path = &out_path.clone();
         let pattern = pattern.iter().map(|&s| s.to_owned()).collect::<Vec<_>>();
@@ -880,7 +877,7 @@ pub mod tests {
         let result = fqgrep_from_opts(&opts);
         assert_eq!(result.unwrap(), expected);
     }
-    
+
     //
     // ############################################################################################
     // Tests that an error is returned when protein and reverse_complement are both present
