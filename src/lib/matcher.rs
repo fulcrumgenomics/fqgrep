@@ -1,10 +1,11 @@
+use bio::data_structures::bitenc::BitEnc;
 use bitvec::prelude::*;
 use std::ops::Range;
 
 use crate::color::{color_background, color_head};
 use crate::color::{COLOR_BACKGROUND, COLOR_BASES, COLOR_QUALS};
-use crate::reverse_complement;
 use crate::DNA_BASES;
+use crate::{encode, reverse_complement};
 use anyhow::{bail, Context, Result};
 use bstr::ByteSlice;
 use regex::bytes::{Regex, RegexBuilder, RegexSet, RegexSetBuilder};
@@ -25,7 +26,7 @@ pub struct MatcherOpts {
 /// Builds a bit vector from an iterator of ranges.  The ranges may overlap each other.
 fn to_bitvec(ranges: impl Iterator<Item = Range<usize>>, len: usize) -> BitVec {
     let mut vec = bitvec![0; len];
-    ranges.for_each(|range| {
+    ranges.for_each(|range: Range<usize>| {
         for index in range {
             vec.set(index, true);
         }
@@ -39,13 +40,32 @@ fn bases_colored(
     bases: &[u8],
     quals: &[u8],
     ranges: impl Iterator<Item = Range<usize>>,
+    invert_match: bool,
 ) -> (Vec<u8>, Vec<u8>) {
     // The resulting colored bases
     let mut colored_bases = Vec::with_capacity(bases.len());
     let mut colored_quals = Vec::with_capacity(bases.len());
 
+    let ranges: Vec<Range<usize>> = if invert_match {
+        let mut new_ranges: Vec<Range<usize>> = Vec::new();
+        for range in ranges {
+            if range.start > 1 {
+                new_ranges.push(1..range.start);
+            }
+            if range.end < bases.len() {
+                new_ranges.push(range.end + 1..bases.len());
+            }
+        }
+        if new_ranges.is_empty() {
+            new_ranges.push(0..bases.len());
+        }
+        new_ranges.clone()
+    } else {
+        ranges.collect()
+    };
+
     // Merge the ranges into a bit mask, with 1 indicating that base is part of a pattern match
-    let bits = to_bitvec(ranges, bases.len());
+    let bits = to_bitvec(ranges.iter().cloned(), bases.len());
 
     // Iterate over the bit mask, finding stretches of matching and non-matching bases.  Color both
     // in both the bases and qualities
@@ -202,9 +222,14 @@ impl Matcher for FixedStringMatcher {
                     start,
                     end: start + self.pattern.len(),
                 });
-            bases_colored(bases, quals, ranges.chain(ranges_revcomp))
+            bases_colored(
+                bases,
+                quals,
+                ranges.chain(ranges_revcomp),
+                self.opts().invert_match,
+            )
         } else {
-            bases_colored(bases, quals, ranges)
+            bases_colored(bases, quals, ranges, self.opts().invert_match)
         }
     }
 
@@ -256,9 +281,14 @@ impl Matcher for FixedStringSetMatcher {
                     })
                     .collect::<Vec<_>>()
             });
-            bases_colored(bases, quals, ranges.chain(ranges_revcomp))
+            bases_colored(
+                bases,
+                quals,
+                ranges.chain(ranges_revcomp),
+                self.opts().invert_match,
+            )
         } else {
-            bases_colored(bases, quals, ranges)
+            bases_colored(bases, quals, ranges, self.opts().invert_match)
         }
     }
 
@@ -278,6 +308,204 @@ impl FixedStringSetMatcher {
             .map(|pattern| pattern.as_ref().to_owned().as_bytes().to_vec())
             .collect();
         Self { patterns, opts }
+    }
+}
+
+fn bitenc_find(bases: &BitEnc, needle: &BitEnc, has_iupac: bool) -> bool {
+    // can use a rolling hash to quickly discount offsets.  But the needle cannot have IUPAC codes!
+    let mut bases_hash: usize = 0;
+    let needle_hash = if has_iupac {
+        0
+    } else {
+        let mut hash: usize = 0;
+        for i in 0..needle.nr_symbols() {
+            hash += needle.get(i).unwrap() as usize;
+        }
+        hash
+    };
+    'outer: for offset in 0..=bases.nr_symbols() - needle.nr_symbols() {
+        if !has_iupac {
+            if offset == 0 {
+                for i in 0..needle.nr_symbols() {
+                    let base = bases.get(i).unwrap();
+                    bases_hash += base as usize;
+                }
+            } else {
+                bases_hash += bases.get(offset + needle.nr_symbols() - 1).unwrap() as usize;
+                bases_hash -= bases.get(offset - 1).unwrap() as usize;
+            }
+            if bases_hash != needle_hash {
+                continue 'outer;
+            }
+        }
+        for i in 0..needle.nr_symbols() {
+            let base = bases.get(offset + i).unwrap();
+            if needle.get(i).unwrap() & base != base {
+                continue 'outer;
+            }
+        }
+        return true;
+    }
+    false
+}
+
+fn bitenc_find_all(bases: &BitEnc, needle: &BitEnc, has_iupac: bool) -> Vec<Range<usize>> {
+    let mut ranges: Vec<Range<usize>> = Vec::new();
+    // can use a rolling hash to quickly discount offsets.  But the needle cannot have IUPAC codes!
+    let mut bases_hash: usize = 0;
+    let needle_hash = if has_iupac {
+        0
+    } else {
+        let mut hash: usize = 0;
+        for i in 0..needle.nr_symbols() {
+            hash += needle.get(i).unwrap() as usize;
+        }
+        hash
+    };
+    'outer: for offset in 0..=(bases.nr_symbols() - needle.nr_symbols()) {
+        if !has_iupac {
+            if offset == 0 {
+                for i in 0..needle.nr_symbols() {
+                    let base = bases.get(i).unwrap();
+                    bases_hash += base as usize;
+                }
+            } else {
+                bases_hash += bases.get(offset + needle.nr_symbols() - 1).unwrap() as usize;
+                bases_hash -= bases.get(offset - 1).unwrap() as usize;
+            }
+            if bases_hash != needle_hash {
+                continue 'outer;
+            }
+        }
+        for i in 0..needle.nr_symbols() {
+            let vec_value = bases.get(offset + i).unwrap();
+            if needle.get(i).unwrap() & vec_value != vec_value {
+                continue 'outer;
+            }
+        }
+        ranges.push(offset..offset + needle.nr_symbols());
+    }
+    ranges
+}
+
+/// Matcher for a bitvector
+pub struct BitMaskMatcher {
+    bitenc: BitEnc,
+    has_iupac: bool,
+    opts: MatcherOpts,
+}
+
+impl Matcher for BitMaskMatcher {
+    fn bases_match(&self, bases: &[u8]) -> bool {
+        bitenc_find(&encode(bases), &self.bitenc, self.has_iupac) != self.opts.invert_match
+    }
+
+    fn color_matched_bases(&self, bases: &[u8], quals: &[u8]) -> (Vec<u8>, Vec<u8>) {
+        let mut ranges = bitenc_find_all(&encode(bases), &self.bitenc, self.has_iupac);
+        if self.opts().reverse_complement {
+            let bases_revcomp = &reverse_complement(bases);
+            let ranges_revcomp: Vec<Range<usize>> =
+                bitenc_find_all(&encode(bases_revcomp), &self.bitenc, self.has_iupac)
+                    .iter()
+                    .map(|range| Range {
+                        start: bases.len() - range.end,
+                        end: bases.len() - range.start,
+                    })
+                    .collect();
+            ranges.extend(ranges_revcomp);
+        }
+        bases_colored(
+            bases,
+            quals,
+            ranges.iter().cloned(),
+            self.opts().invert_match,
+        )
+    }
+
+    fn opts(&self) -> MatcherOpts {
+        self.opts
+    }
+}
+
+impl BitMaskMatcher {
+    pub fn new(bitenc: BitEnc, opts: MatcherOpts) -> Self {
+        let has_iupac = !bitenc.iter().all(|value| DNA_BASES.contains(&value));
+        Self {
+            bitenc,
+            has_iupac,
+            opts,
+        }
+    }
+}
+
+/// Matcher for a set of fixed string patterns
+pub struct BitMaskSetMatcher {
+    bitencs: Vec<BitEnc>,
+    has_iupac: Vec<bool>,
+    opts: MatcherOpts,
+}
+
+impl Matcher for BitMaskSetMatcher {
+    fn bases_match(&self, bases: &[u8]) -> bool {
+        let bases = encode(bases);
+        self.bitencs
+            .iter()
+            .enumerate()
+            .any(|(index, needle)| bitenc_find(&bases, needle, self.has_iupac[index]))
+            != self.opts.invert_match
+    }
+
+    fn color_matched_bases(&self, bases: &[u8], quals: &[u8]) -> (Vec<u8>, Vec<u8>) {
+        let mut ranges = self
+            .bitencs
+            .iter()
+            .enumerate()
+            .flat_map(|(index, bitenc)| {
+                bitenc_find_all(&encode(bases), bitenc, self.has_iupac[index])
+            })
+            .collect::<Vec<_>>();
+        if self.opts().reverse_complement {
+            let bases_revcomp = &reverse_complement(bases);
+            let ranges_revcomp = self
+                .bitencs
+                .iter()
+                .enumerate()
+                .flat_map(|(index, bitenc)| {
+                    bitenc_find_all(&encode(bases_revcomp), bitenc, self.has_iupac[index])
+                        .iter()
+                        .map(|range| Range {
+                            start: bases.len() - range.end,
+                            end: bases.len() - range.start,
+                        })
+                        .collect::<Vec<Range<usize>>>()
+                })
+                .collect::<Vec<_>>();
+            ranges.extend(ranges_revcomp);
+        }
+        bases_colored(
+            bases,
+            quals,
+            ranges.iter().cloned(),
+            self.opts().invert_match,
+        )
+    }
+
+    fn opts(&self) -> MatcherOpts {
+        self.opts
+    }
+}
+
+impl BitMaskSetMatcher {
+    pub fn new(bitencs: Vec<BitEnc>, opts: MatcherOpts) -> Self {
+        let has_iupac = bitencs
+            .iter()
+            .map(|bitenc| !bitenc.iter().all(|value| DNA_BASES.contains(&value)))
+            .collect();
+        Self {
+            bitencs,
+            has_iupac,
+            opts,
+        }
     }
 }
 
@@ -314,9 +542,14 @@ impl Matcher for RegexMatcher {
                         start: bases.len() - range.start - range.len(),
                         end: bases.len() - range.start,
                     });
-            bases_colored(bases, quals, ranges.chain(ranges_revcomp))
+            bases_colored(
+                bases,
+                quals,
+                ranges.chain(ranges_revcomp),
+                self.opts().invert_match,
+            )
         } else {
-            bases_colored(bases, quals, ranges)
+            bases_colored(bases, quals, ranges, self.opts().invert_match)
         }
     }
 
@@ -378,9 +611,14 @@ impl Matcher for RegexSetMatcher {
                         end: bases.len() - range.start,
                     })
             });
-            bases_colored(bases, quals, ranges.chain(ranges_revcomp))
+            bases_colored(
+                bases,
+                quals,
+                ranges.chain(ranges_revcomp),
+                self.opts().invert_match,
+            )
         } else {
-            bases_colored(bases, quals, ranges)
+            bases_colored(bases, quals, ranges, self.opts().invert_match)
         }
     }
 
@@ -394,16 +632,19 @@ pub struct MatcherFactory;
 
 impl MatcherFactory {
     pub fn new_matcher(
-        pattern: &Option<String>,
         fixed_strings: bool,
         regexp: &Vec<String>,
         match_opts: MatcherOpts,
+        bitencs: &Vec<BitEnc>,
     ) -> Box<dyn Matcher + Sync + Send> {
-        match (fixed_strings, &pattern) {
-            (true, Some(pattern)) => Box::new(FixedStringMatcher::new(pattern, match_opts)),
-            (false, Some(pattern)) => Box::new(RegexMatcher::new(pattern, match_opts)),
-            (true, None) => Box::new(FixedStringSetMatcher::new(regexp, match_opts)),
-            (false, None) => Box::new(RegexSetMatcher::new(regexp, match_opts)),
+        // TODO bit mask
+        match (fixed_strings, regexp.len() == 1, bitencs.is_empty()) {
+            (true, true, true) => Box::new(FixedStringMatcher::new(&regexp[0], match_opts)),
+            (true, false, true) => Box::new(FixedStringSetMatcher::new(regexp, match_opts)),
+            (true, true, false) => Box::new(BitMaskMatcher::new(bitencs[0].clone(), match_opts)),
+            (true, false, false) => Box::new(BitMaskSetMatcher::new(bitencs.clone(), match_opts)),
+            (false, true, _) => Box::new(RegexMatcher::new(&regexp[0], match_opts)),
+            (false, false, _) => Box::new(RegexSetMatcher::new(regexp, match_opts)),
         }
     }
 }
@@ -411,10 +652,14 @@ impl MatcherFactory {
 // Tests
 #[cfg(test)]
 pub mod tests {
-    use crate::matcher::*;
+    use crate::matcher::{
+        bitvec, to_bitvec, validate_fixed_pattern, BitVec, FixedStringMatcher,
+        FixedStringSetMatcher, Lsb0, Matcher, MatcherOpts, OwnedRecord, RegexMatcher,
+        RegexSetMatcher,
+    };
     use rstest::rstest;
 
-    /// Helper function takes a sequence and returns a seq_io::fastq::OwnedRecord
+    /// Helper function takes a sequence and returns a `seq_io::fastq::OwnedRecord`
     ///
     fn write_owned_record(seq: &str) -> OwnedRecord {
         let read = OwnedRecord {
