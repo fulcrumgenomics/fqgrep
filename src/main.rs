@@ -2,6 +2,8 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use anyhow::{Context, Result, bail, ensure};
+use clap::builder::styling;
+use clap::{ColorChoice, Parser as ClapParser, ValueEnum};
 use env_logger::Env;
 use flate2::bufread::MultiGzDecoder;
 use flume::{Receiver, Sender, bounded};
@@ -22,8 +24,6 @@ use std::{
     path::PathBuf,
     str::FromStr,
 };
-use structopt::clap::arg_enum;
-use structopt::{StructOpt, clap::AppSettings};
 
 /// The number of reads in a chunk
 const CHUNKSIZE: usize = 5000; // * num_cpus::get();
@@ -160,22 +160,29 @@ fn spawn_reader(file: PathBuf, decompress: bool) -> Receiver<Vec<OwnedRecord>> {
     rx
 }
 
-arg_enum! {
-    #[derive(PartialEq, Debug, Clone)]
-    enum Color {
+#[derive(ValueEnum, PartialEq, Debug, Clone)]
+enum Color {
     Never,
     Always,
     Auto,
 }
-}
 
+/// The style for the usage
+const STYLES: styling::Styles = styling::Styles::styled()
+    .header(styling::AnsiColor::Yellow.on_default().bold())
+    .usage(styling::AnsiColor::Yellow.on_default().bold())
+    .literal(styling::AnsiColor::Blue.on_default().bold())
+    .placeholder(styling::AnsiColor::Cyan.on_default());
+
+/// # OVERVIEW
+///
 /// The fqgrep utility searches any given input FASTQ files, selecting records whose bases match
 /// one or more patterns.  By default, a pattern matches the bases in a FASTQ record if the
 /// regular expression (RE) in the pattern matches the bases.  An empty expression matches every
 /// line.  Each FASTQ record that matches at least one of the patterns is written to the standard
 /// output.
 ///
-/// INPUT COMPRESSION
+/// # INPUT COMPRESSION
 ///
 /// By default, the input files are assumed to be uncompressed with the following exceptions: (1)
 /// If the input files are real files and end with `.gz` or `.bgz`, they are assumed to be GZIP
@@ -183,7 +190,7 @@ arg_enum! {
 /// (3) if the `-Z/--decompress` option is specified then any unrecongized inputs (including
 /// standard input) are assumed to be GZIP compressed.
 ///
-/// THREADS
+/// # THREADS
 ///
 /// The `--threads` option controls the number of threads used to _search_ the reads.
 /// Independently, for single end reads or interleaved paired end reads, a single thread will be
@@ -191,71 +198,71 @@ arg_enum! {
 /// be used to read the FASTQs for each end of a pair.  Finally, a single thread will be created
 /// for the writer.
 ///
-/// EXIT STATUS
+/// # EXIT STATUS
 ///
 /// The fqgrep utility exits with one of the following values:
 /// 0 if one or more lines were selected, 1 if no lines were selected, and >1 if an error occurred.
 ///
-#[derive(StructOpt, Debug, Clone)]
-#[structopt(
-    name = "fqgrep", 
-    global_setting(AppSettings::ColoredHelp),
-    global_setting(AppSettings::DeriveDisplayOrder),
+#[derive(ClapParser, Debug, Clone)]
+#[clap(
+    name = "fqgrep",
+    color = ColorChoice::Auto,
+    styles = STYLES,
     version = built_info::VERSION.as_str())
  ]
 #[allow(clippy::struct_excessive_bools)]
 struct Opts {
     /// The number of threads to use for matching reads against pattern.  See the full usage for
     /// threads specific to reading and writing.
-    #[structopt(long, short = "t", default_value = NUM_CPU.as_str())]
+    #[clap(long, short = 't', default_value = NUM_CPU.as_str())]
     threads: usize,
 
     // TODO: support GREP_COLOR(S) (or FQGREP_COLOR(S)) environment variables
     /// Mark up the matching text.  The possible values of when are “never”, “always” and “auto”.
-    #[structopt(long = "color", default_value = "never")]
+    #[clap(long = "color", default_value = "never")]
     color: Color,
 
     /// Only a count of selected lines is written to standard output.
-    #[structopt(long, short = "c")]
+    #[clap(long, short = 'c')]
     count: bool,
 
     /// Specify a pattern used during the search of the input: an input line is selected if it
     /// matches any of the specified patterns.  This option is most useful when multiple `-e`
     /// options are used to specify multiple patterns.
-    #[structopt(long, short = "e")]
+    #[clap(long, short = 'e')]
     regexp: Vec<String>,
 
     /// Interpret pattern as a set of fixed strings
-    #[structopt(long, short = "F")]
+    #[clap(long, short = 'F')]
     fixed_strings: bool,
 
     /// Read one or more newline separated patterns from file.  Empty pattern lines match every
     /// input line.  Newlines are not considered part of a pattern.  If file is empty, nothing
     /// is matched.
-    #[structopt(long, short = "f")]
+    #[clap(long, short = 'f')]
     file: Option<PathBuf>,
 
     /// Selected lines are those not matching any of the specified patterns
-    #[structopt(short = "v")]
+    #[clap(short = 'v')]
     invert_match: bool,
 
     /// Assume all unrecognized inputs are GZIP compressed.
-    #[structopt(short = "Z", long)]
+    #[clap(short = 'Z', long)]
     decompress: bool,
 
     /// Treat the input files as paired.  The number of input files must be a multiple of two,
     /// with the first file being R1, second R2, third R1, fourth R2, and so on.  If the pattern
     /// matches either R1 or R2, then both R1 and R2 will be output (interleaved).  If the input
     /// is standard input, then treat the input as interlaved paired end reads.
-    #[structopt(long)]
+    #[clap(long)]
     paired: bool,
 
     /// Search the reverse complement for matches.
-    #[structopt(long)]
+    #[clap(long)]
     reverse_complement: bool,
 
     /// Write progress information
-    #[structopt(long)]
+    #[clap(long)]
     progress: bool,
 
     /// The first argument is the pattern to match, with the remaining arguments containing the
@@ -266,7 +273,7 @@ struct Opts {
 
     /// Hidden option to capture stdout for testing
     ///
-    #[structopt(long, hidden = true)]
+    #[clap(long, hide_short_help = true, hide_long_help = true)]
     output: Option<PathBuf>,
 }
 
@@ -479,8 +486,8 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
     });
 
     drop(writer); // so count_tx.send will execute
-    // Get the final count of records matched
 
+    // Get the final count of records matched
     match count_rx.recv() {
         Ok(count) => Ok(count),
         Err(error) => Err(error).with_context(|| "failed receive final match counts"),
@@ -542,7 +549,7 @@ fn setup() -> Opts {
     }
     env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
 
-    Opts::from_args()
+    Opts::parse()
 }
 
 // Tests
