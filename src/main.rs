@@ -1,17 +1,17 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{Context, Result, bail, ensure};
 use clap::builder::styling;
 use clap::{ColorChoice, Parser as ClapParser, ValueEnum};
 use env_logger::Env;
 use flate2::bufread::MultiGzDecoder;
-use flume::{bounded, Receiver, Sender};
-use fqgrep_lib::matcher::{validate_fixed_pattern, Matcher, MatcherFactory, MatcherOpts};
+use flume::{Receiver, Sender, bounded};
+use fqgrep_lib::matcher::{Matcher, MatcherFactory, MatcherOpts, validate_fixed_pattern};
 use fqgrep_lib::{is_fastq_path, is_gzip_path};
 use gzp::BUFSIZE;
 use isatty::stdout_isatty;
-use itertools::{self, izip, Itertools};
+use itertools::{self, Itertools, izip};
 use lazy_static::lazy_static;
 use parking_lot::Mutex;
 use proglog::{CountFormatterKind, ProgLog, ProgLogBuilder};
@@ -486,8 +486,8 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
     });
 
     drop(writer); // so count_tx.send will execute
-                  // Get the final count of records matched
 
+    // Get the final count of records matched
     match count_rx.recv() {
         Ok(count) => Ok(count),
         Err(error) => Err(error).with_context(|| "failed receive final match counts"),
