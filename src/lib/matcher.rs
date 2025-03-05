@@ -1,11 +1,11 @@
 use bitvec::prelude::*;
 use std::ops::Range;
 
-use crate::color::{color_background, color_head};
-use crate::color::{COLOR_BACKGROUND, COLOR_BASES, COLOR_QUALS};
-use crate::reverse_complement;
 use crate::DNA_BASES;
-use anyhow::{bail, Context, Result};
+use crate::color::{COLOR_BACKGROUND, COLOR_BASES, COLOR_QUALS};
+use crate::color::{color_background, color_head};
+use crate::reverse_complement;
+use anyhow::{Context, Result, bail};
 use bstr::ByteSlice;
 use regex::bytes::{Regex, RegexBuilder, RegexSet, RegexSetBuilder};
 use seq_io::fastq::{OwnedRecord, Record};
@@ -473,7 +473,7 @@ pub mod tests {
         #[case] expected: bool,
     ) {
         let invert_matches = [true, false];
-        for invert_match in IntoIterator::into_iter(invert_matches).to_owned() {
+        for invert_match in IntoIterator::into_iter(invert_matches) {
             let opts = MatcherOpts {
                 invert_match,
                 reverse_complement,
@@ -512,7 +512,7 @@ pub mod tests {
         #[case] expected: bool,
     ) {
         let invert_matches = [true, false];
-        for invert_match in IntoIterator::into_iter(invert_matches).to_owned() {
+        for invert_match in IntoIterator::into_iter(invert_matches) {
             let opts = MatcherOpts {
                 invert_match,
                 reverse_complement,
@@ -547,14 +547,14 @@ pub mod tests {
         #[case] expected: bool,
     ) {
         let invert_matches = [true, false];
-        for invert_match in IntoIterator::into_iter(invert_matches).to_owned() {
+        for invert_match in IntoIterator::into_iter(invert_matches) {
             let opts = MatcherOpts {
                 invert_match,
                 reverse_complement,
                 color: false,
             };
 
-            let matcher = RegexMatcher::new(&pattern, opts);
+            let matcher = RegexMatcher::new(pattern, opts);
             let mut read_record = write_owned_record(seq);
             let result = matcher.read_match(&mut read_record);
             if invert_match {
@@ -587,7 +587,7 @@ pub mod tests {
         #[case] expected: bool,
     ) {
         let invert_matches = [true, false];
-        for invert_match in IntoIterator::into_iter(invert_matches).to_owned() {
+        for invert_match in IntoIterator::into_iter(invert_matches) {
             let opts = MatcherOpts {
                 invert_match,
                 reverse_complement,
@@ -612,14 +612,14 @@ pub mod tests {
     #[test]
     fn test_validate_fixed_pattern_is_ok() {
         let pattern = "AGTGTGATG";
-        let result = validate_fixed_pattern(&pattern);
+        let result = validate_fixed_pattern(pattern);
         assert!(result.is_ok())
     }
     #[test]
     fn test_validate_fixed_pattern_error() {
         let pattern = "AXGTGTGATG";
         let msg = String::from("Fixed pattern must contain only DNA bases: A .. [X] .. GTGTGATG");
-        let result = validate_fixed_pattern(&pattern);
+        let result = validate_fixed_pattern(pattern);
         let inner = result.unwrap_err().to_string();
         assert_eq!(inner, msg);
     }

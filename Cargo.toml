@@ -2,7 +2,7 @@
 name = "fqgrep"
 authors = ["Nils Homer <nils@fulcrumgenomics.com>", "Seth Stadick <seth@fulcrumgenomics.com>"]
 version = "1.0.3"
-edition = "2018"
+edition = "2024"
 license = "MIT"
 description = "Search a pair of fastq files for reads that match a given ref or alt sequence"
 homepage = "https://github.com/fulcrumgenomics/fqgrep"
@@ -26,33 +26,34 @@ lto = true
 
 [dependencies]
 ansi_term = "0.12.1"
-anyhow = "1.0.44"
+anyhow = "1.0.97"
 bitvec = "1.0.1"
 bstr = "0.2.17"
-csv = "1.1.6"
-env_logger = "0.9.0"
-flate2 = {version = "1.0.22", default-features = false, features = ["zlib-ng-compat"]}
-flume = "0.10.9"
-gzp = "0.9.1"
+csv = "^1, <1.2"
+env_logger = "0.9.3"
+flate2 = {version = "1.1.0", default-features = false, features = ["zlib-ng"]}
+flume = "0.11.1"
+gzp = "1.0.1"
 isatty = "0.1.9"
-itertools = "0.10.3"
-lazy_static = "1.4.0"
-log = "0.4.14"
-mimalloc = {version = "0.1.26", default-features = false}
-num_cpus = "1.13.0"
+itertools = "0.10.5"
+lazy_static = "1.5.0"
+libz-ng-sys = "1.1.21"
+log = "0.4.26"
+mimalloc = {version = "0.1.43", default-features = false}
+num_cpus = "1.16.0"
 parking_lot = "0.11.2"
 proglog = {version = "0.3.0", features = ["pretty_counts"]}
-rayon = "1.5.1"
-regex = "1.6.0"
-seq_io = "0.3.1"
-serde = {version = "1.0.130", features = ["derive"]}
-structopt = "0.3.23"
+rayon = "1.10.0"
+regex = "1.11.1"
+seq_io = "0.3.3"
+serde = {version = "1.0.218", features = ["derive"]}
+structopt = "0.3.26"
 
 [build-dependencies]
-built = {version ="0.5.1", features = ["git2"]}
+built = {version ="0.5.2", features = ["git2"]}
 
 [dev-dependencies]
-fgoxide = "0.1.3"
+fgoxide = "0.5.0"
 rstest = "0.12.0"
-seq_io = "0.3.1"
+seq_io = "0.3.3"
 tempfile = "3"

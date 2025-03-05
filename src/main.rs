@@ -1,15 +1,15 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{Context, Result, bail, ensure};
 use env_logger::Env;
 use flate2::bufread::MultiGzDecoder;
-use flume::{bounded, Receiver, Sender};
-use fqgrep_lib::matcher::{validate_fixed_pattern, Matcher, MatcherFactory, MatcherOpts};
+use flume::{Receiver, Sender, bounded};
+use fqgrep_lib::matcher::{Matcher, MatcherFactory, MatcherOpts, validate_fixed_pattern};
 use fqgrep_lib::{is_fastq_path, is_gzip_path};
 use gzp::BUFSIZE;
 use isatty::stdout_isatty;
-use itertools::{self, izip, Itertools};
+use itertools::{self, Itertools, izip};
 use lazy_static::lazy_static;
 use parking_lot::Mutex;
 use proglog::{CountFormatterKind, ProgLog, ProgLogBuilder};
@@ -23,7 +23,7 @@ use std::{
     str::FromStr,
 };
 use structopt::clap::arg_enum;
-use structopt::{clap::AppSettings, StructOpt};
+use structopt::{StructOpt, clap::AppSettings};
 
 /// The number of reads in a chunk
 const CHUNKSIZE: usize = 5000; // * num_cpus::get();
@@ -479,7 +479,7 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
     });
 
     drop(writer); // so count_tx.send will execute
-                  // Get the final count of records matched
+    // Get the final count of records matched
 
     match count_rx.recv() {
         Ok(count) => Ok(count),
@@ -536,7 +536,9 @@ fn process_paired_reads(
 /// Parse args and set up logging / tracing
 fn setup() -> Opts {
     if std::env::var("RUST_LOG").is_err() {
-        std::env::set_var("RUST_LOG", "info");
+        unsafe {
+            std::env::set_var("RUST_LOG", "info");
+        }
     }
     env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
 
@@ -613,7 +615,7 @@ pub mod tests {
         let name = String::from("pattern.txt");
         let pattern_path = temp_dir.path().join(name);
         // Simply pass pattern to io.write_lines()
-        io.write_lines(&pattern_path, &*pattern).unwrap();
+        io.write_lines(&pattern_path, pattern).unwrap();
         // Return
         pattern_path
     }
@@ -644,26 +646,20 @@ pub mod tests {
         output: Option<PathBuf>,
         compression: String,
     ) -> Opts {
-        let fq_path = write_fastq(&dir, &seqs, compression);
+        let fq_path = write_fastq(dir, seqs, compression);
 
         let (pattern_string, pattern_file) = {
             if pattern_from_file {
-                (vec![], Some(write_pattern(&dir, &regexp)))
+                (vec![], Some(write_pattern(dir, regexp)))
             } else {
-                (regexp.to_vec(), None)
+                (regexp.clone(), None)
             }
         };
 
-        let return_opts = Opts {
+        Opts {
             threads: 4,
             color: Color::Never,
-            count: {
-                if &output == &None {
-                    true
-                } else {
-                    false
-                }
-            },
+            count: output.is_none(),
             regexp: pattern_string,
             fixed_strings: false,
             file: pattern_file,
@@ -672,10 +668,9 @@ pub mod tests {
             paired: false,
             reverse_complement: false,
             progress: true,
-            args: fq_path.to_vec(),
-            output: output,
-        };
-        return_opts
+            args: fq_path.clone(),
+            output,
+        }
     }
 
     /// Returns sequences from fastq
