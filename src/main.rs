@@ -501,11 +501,6 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
                         progress.record();
                     }
                     *found = matcher.read_match(&record);
-                    println!(
-                        "seq: {} result: {}",
-                        String::from_utf8_lossy(record.seq()),
-                        *found,
-                    );
                 },
                 |record, found| {
                     if *found {
@@ -527,10 +522,6 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
             )
             .unwrap();
         }
-    }
-
-    if opts.paired {
-        num_matches /= 2;
     }
 
     if opts.count {
@@ -961,15 +952,7 @@ pub mod tests {
         opts.paired = paired;
         let _result = fqgrep_from_opts(&opts);
         let return_sequences = slurp_output(result_path.to_path_buf());
-
         let sequence_match = expected_seq == return_sequences;
-        for seq in return_sequences {
-            println!("return_sequence: {seq}");
-        }
-        for seq in expected_seq {
-            println!("expected_seq: {seq}");
-        }
-        println!("pattern: {pattern:?}");
         assert_eq!(sequence_match, expected_bool);
     }
 
