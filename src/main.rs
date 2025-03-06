@@ -13,7 +13,6 @@ use fqgrep_lib::seq_io::{
 use fqgrep_lib::{is_fastq_path, is_gzip_path};
 use gzp::BUFSIZE;
 use isatty::stdout_isatty;
-use lazy_static::lazy_static;
 use proglog::{CountFormatterKind, ProgLog, ProgLogBuilder};
 use seq_io::fastq::{self, Record, RefRecord};
 use seq_io::parallel::parallel_fastq;
@@ -23,15 +22,15 @@ use std::{
     io::{BufRead, BufReader, BufWriter, Read, Write},
     path::PathBuf,
     str::FromStr,
+    sync::LazyLock,
 };
 
-lazy_static! {
-    /// Return the number of cpus as a String
-    pub static ref NUM_CPU: String = num_cpus::get().to_string();
-}
+/// The number of cpus as a String
+pub static NUM_CPU: LazyLock<String> = LazyLock::new(|| num_cpus::get().to_string());
 
 pub mod built_info {
-    use lazy_static::lazy_static;
+    use std::sync::LazyLock;
+
     include!(concat!(env!("OUT_DIR"), "/built.rs"));
 
     /// Get a software version string including
@@ -52,10 +51,7 @@ pub mod built_info {
         format!("{}{}", prefix, suffix)
     }
 
-    lazy_static! {
-        /// Version of the software with git hash
-        pub static ref VERSION: String = get_software_version();
-    }
+    pub static VERSION: LazyLock<String> = LazyLock::new(get_software_version);
 }
 
 fn spawn_reader(file: PathBuf, decompress: bool) -> fastq::Reader<Box<dyn std::io::Read + Send>> {
