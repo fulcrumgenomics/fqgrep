@@ -1,12 +1,12 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{bail, ensure, Context, Result};
 use clap::builder::styling;
 use clap::{ColorChoice, Parser as ClapParser, ValueEnum};
 use env_logger::Env;
 use flate2::bufread::MultiGzDecoder;
-use fqgrep_lib::matcher::{Matcher, MatcherFactory, MatcherOpts, validate_fixed_pattern};
+use fqgrep_lib::matcher::{validate_fixed_pattern, Matcher, MatcherFactory, MatcherOpts};
 use fqgrep_lib::{is_fastq_path, is_gzip_path};
 use gzp::BUFSIZE;
 use isatty::stdout_isatty;
@@ -373,56 +373,11 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
                 opts.threads as u32,
                 opts.threads,
                 |(read1, read2), found| {
-                    print!("{:?}", read1);
                     *found = process_interleaved_reads(read1, read2, &matcher, &progress_logger);
                 },
                 |(read1, read2), found| {
                     if *found > 0 {
                         num_matches += 1;
-                    }
-                    if let Some(writer) = &mut maybe_writer {
-                        if color {
-                            let found1 = *found == 1;
-                            let found2 = *found == 2 || matcher.read_match(&read2);
-                            let mut read1 = read1.to_owned_record();
-                            let mut read2 = read2.to_owned_record();
-                            matcher.color(&mut read1, found1);
-                            matcher.color(&mut read2, found2);
-                            fastq::write_to(&mut *writer, read1.head(), read1.seq(), read1.qual())
-                                .unwrap();
-                            fastq::write_to(&mut *writer, read2.head(), read2.seq(), read2.qual())
-                                .unwrap();
-                        } else {
-                            fastq::write_to(&mut *writer, read1.head(), read1.seq(), read1.qual())
-                                .unwrap();
-                            fastq::write_to(&mut *writer, read2.head(), read2.seq(), read2.qual())
-                                .unwrap();
-                        }
-                    }
-                    None::<()>
-                },
-            )
-            .unwrap();
-        } else {
-            // // Pairs of FASTQ files
-            for file_pairs in files.chunks_exact(2) {
-                let reader1: fastq::Reader<Box<dyn Read + Send>> =
-                    spawn_reader(file_pairs[0].clone(), opts.decompress);
-                let reader2: fastq::Reader<Box<dyn Read + Send>> =
-                    spawn_reader(file_pairs[1].clone(), opts.decompress);
-
-                parallel_paired_fastq(
-                    PairedFastqReader { reader1, reader2 },
-                    opts.threads as u32,
-                    opts.threads,
-                    |(read1, read2), found| {
-                        *found =
-                            process_interleaved_reads(read1, read2, &matcher, &progress_logger);
-                    },
-                    |(read1, read2), found| {
-                        if *found > 0 {
-                            num_matches += 1;
-                        }
                         if let Some(writer) = &mut maybe_writer {
                             if color {
                                 let found1 = *found == 1;
@@ -462,6 +417,70 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
                                 .unwrap();
                             }
                         }
+                    }
+                    None::<()>
+                },
+            )
+            .unwrap();
+        } else {
+            // // Pairs of FASTQ files
+            for file_pairs in files.chunks_exact(2) {
+                let reader1: fastq::Reader<Box<dyn Read + Send>> =
+                    spawn_reader(file_pairs[0].clone(), opts.decompress);
+                let reader2: fastq::Reader<Box<dyn Read + Send>> =
+                    spawn_reader(file_pairs[1].clone(), opts.decompress);
+
+                parallel_paired_fastq(
+                    PairedFastqReader { reader1, reader2 },
+                    opts.threads as u32,
+                    opts.threads,
+                    |(read1, read2), found| {
+                        *found =
+                            process_interleaved_reads(read1, read2, &matcher, &progress_logger);
+                    },
+                    |(read1, read2), found| {
+                        if *found > 0 {
+                            num_matches += 1;
+                            if let Some(writer) = &mut maybe_writer {
+                                if color {
+                                    let found1 = *found == 1;
+                                    let found2 = *found == 2 || matcher.read_match(&read2);
+                                    let mut read1 = read1.to_owned_record();
+                                    let mut read2 = read2.to_owned_record();
+                                    matcher.color(&mut read1, found1);
+                                    matcher.color(&mut read2, found2);
+                                    fastq::write_to(
+                                        &mut *writer,
+                                        read1.head(),
+                                        read1.seq(),
+                                        read1.qual(),
+                                    )
+                                    .unwrap();
+                                    fastq::write_to(
+                                        &mut *writer,
+                                        read2.head(),
+                                        read2.seq(),
+                                        read2.qual(),
+                                    )
+                                    .unwrap();
+                                } else {
+                                    fastq::write_to(
+                                        &mut *writer,
+                                        read1.head(),
+                                        read1.seq(),
+                                        read1.qual(),
+                                    )
+                                    .unwrap();
+                                    fastq::write_to(
+                                        &mut *writer,
+                                        read2.head(),
+                                        read2.seq(),
+                                        read2.qual(),
+                                    )
+                                    .unwrap();
+                                }
+                            }
+                        }
                         None::<()>
                     },
                 )
@@ -482,20 +501,25 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
                         progress.record();
                     }
                     *found = matcher.read_match(&record);
+                    println!(
+                        "seq: {} result: {}",
+                        String::from_utf8_lossy(record.seq()),
+                        *found,
+                    );
                 },
                 |record, found| {
                     if *found {
                         num_matches += 1;
-                    }
-                    if let Some(writer) = &mut maybe_writer {
-                        if color {
-                            let mut record = record.to_owned_record();
-                            matcher.color(&mut record, *found);
-                            fastq::write_to(writer, record.head(), record.seq(), record.qual())
-                                .unwrap();
-                        } else {
-                            fastq::write_to(writer, record.head(), record.seq(), record.qual())
-                                .unwrap();
+                        if let Some(writer) = &mut maybe_writer {
+                            if color {
+                                let mut record = record.to_owned_record();
+                                matcher.color(&mut record, *found);
+                                fastq::write_to(writer, record.head(), record.seq(), record.qual())
+                                    .unwrap();
+                            } else {
+                                fastq::write_to(writer, record.head(), record.seq(), record.qual())
+                                    .unwrap();
+                            }
                         }
                     }
                     None::<()>
@@ -939,6 +963,13 @@ pub mod tests {
         let return_sequences = slurp_output(result_path.to_path_buf());
 
         let sequence_match = expected_seq == return_sequences;
+        for seq in return_sequences {
+            println!("return_sequence: {seq}");
+        }
+        for seq in expected_seq {
+            println!("expected_seq: {seq}");
+        }
+        println!("pattern: {pattern:?}");
         assert_eq!(sequence_match, expected_bool);
     }
 

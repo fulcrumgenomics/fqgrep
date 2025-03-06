@@ -2,11 +2,11 @@ use bitvec::prelude::*;
 use seq_io::fastq::RefRecord;
 use std::ops::Range;
 
-use crate::DNA_BASES;
-use crate::color::{COLOR_BACKGROUND, COLOR_BASES, COLOR_QUALS};
 use crate::color::{color_background, color_head};
+use crate::color::{COLOR_BACKGROUND, COLOR_BASES, COLOR_QUALS};
 use crate::reverse_complement;
-use anyhow::{Context, Result, bail};
+use crate::DNA_BASES;
+use anyhow::{bail, Context, Result};
 use bstr::ByteSlice;
 use regex::bytes::{Regex, RegexBuilder, RegexSet, RegexSetBuilder};
 use seq_io::fastq::{OwnedRecord, Record};
@@ -423,17 +423,6 @@ pub mod tests {
     use crate::matcher::*;
     use rstest::rstest;
 
-    /// Helper function takes a sequence and returns a seq_io::fastq::OwnedRecord
-    ///
-    fn write_owned_record(seq: &str) -> OwnedRecord {
-        let read = OwnedRecord {
-            head: ("@Sample").as_bytes().to_vec(),
-            seq: seq.as_bytes().to_vec(),
-            qual: vec![b'X'; seq.len()],
-        };
-        read
-    }
-
     // ############################################################################################
     // Tests to_bitvec()
     // ############################################################################################
@@ -488,8 +477,11 @@ pub mod tests {
                 reverse_complement,
             };
             let matcher = FixedStringMatcher::new(pattern, opts);
-            let mut read_record = write_owned_record(seq);
-            let result = matcher.read_match(&mut read_record);
+            let qual = (0..seq.len()).map(|_| "X").collect::<String>();
+            let record = format!("@id\n{seq}\n+\n{qual}\n");
+            let mut reader = seq_io::fastq::Reader::new(record.as_bytes());
+            let read_record = reader.next().unwrap().unwrap();
+            let result = matcher.read_match(&read_record);
             if invert_match {
                 assert_ne!(result, expected);
             } else {
@@ -526,8 +518,11 @@ pub mod tests {
                 reverse_complement,
             };
             let matcher = FixedStringSetMatcher::new(patterns.iter(), opts);
-            let mut read_record = write_owned_record(seq);
-            let result = matcher.read_match(&mut read_record);
+            let qual = (0..seq.len()).map(|_| "X").collect::<String>();
+            let record = format!("@id\n{seq}\n+\n{qual}\n");
+            let mut reader = seq_io::fastq::Reader::new(record.as_bytes());
+            let read_record = reader.next().unwrap().unwrap();
+            let result = matcher.read_match(&read_record);
             if invert_match {
                 assert_ne!(result, expected);
             } else {
@@ -561,8 +556,11 @@ pub mod tests {
             };
 
             let matcher = RegexMatcher::new(pattern, opts);
-            let mut read_record = write_owned_record(seq);
-            let result = matcher.read_match(&mut read_record);
+            let qual = (0..seq.len()).map(|_| "X").collect::<String>();
+            let record = format!("@id\n{seq}\n+\n{qual}\n");
+            let mut reader = seq_io::fastq::Reader::new(record.as_bytes());
+            let read_record = reader.next().unwrap().unwrap();
+            let result = matcher.read_match(&read_record);
             if invert_match {
                 assert_ne!(result, expected);
             } else {
@@ -600,8 +598,11 @@ pub mod tests {
             };
 
             let matcher = RegexSetMatcher::new(patterns.iter(), opts);
-            let mut read_record = write_owned_record(seq);
-            let result = matcher.read_match(&mut read_record);
+            let qual = (0..seq.len()).map(|_| "X").collect::<String>();
+            let record = format!("@id\n{seq}\n+\n{qual}\n");
+            let mut reader = seq_io::fastq::Reader::new(record.as_bytes());
+            let read_record = reader.next().unwrap().unwrap();
+            let result = matcher.read_match(&read_record);
             if invert_match {
                 assert_ne!(result, expected);
             } else {
@@ -618,7 +619,7 @@ pub mod tests {
     fn test_validate_fixed_pattern_is_ok() {
         let pattern = "AGTGTGATG";
         let result = validate_fixed_pattern(pattern);
-        assert!(result.is_ok())
+        assert!(result.is_ok());
     }
     #[test]
     fn test_validate_fixed_pattern_error() {
