@@ -8,26 +8,23 @@
 pub mod color;
 pub mod matcher;
 pub mod seq_io;
-use lazy_static::lazy_static;
-use std::{borrow::Borrow, path::Path};
+use std::{borrow::Borrow, path::Path, sync::LazyLock};
 
 pub const DNA_BASES: [u8; 5] = *b"ACGTN";
 pub const IUPAC_BASES: [u8; 15] = *b"AGCTYRWSKMDVHBN";
 pub const IUPAC_BASES_COMPLEMENT: [u8; 15] = *b"TCGARYWSMKHBDVN";
 
-lazy_static! {
-    pub static ref COMPLEMENT: [u8; 256] = {
-        let mut comp = [0; 256];
-        for (v, a) in comp.iter_mut().enumerate() {
-            *a = v as u8;
-        }
-        for (&a, &b) in IUPAC_BASES.iter().zip(IUPAC_BASES_COMPLEMENT.iter()) {
-            comp[a as usize] = b;
-            comp[a as usize + 32] = b + 32;  // lowercase variants
-        }
-        comp
-    };
-}
+static COMPLEMENT: LazyLock<[u8; 256]> = LazyLock::new(|| {
+    let mut comp = [0; 256];
+    for (v, a) in comp.iter_mut().enumerate() {
+        *a = v as u8;
+    }
+    for (&a, &b) in IUPAC_BASES.iter().zip(IUPAC_BASES_COMPLEMENT.iter()) {
+        comp[a as usize] = b;
+        comp[a as usize + 32] = b + 32; // lowercase variants
+    }
+    comp
+});
 
 fn complement(a: u8) -> u8 {
     COMPLEMENT[a as usize]

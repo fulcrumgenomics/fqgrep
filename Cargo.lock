@@ -453,7 +453,6 @@ dependencies = [
  "gzp",
  "isatty",
  "itertools",
- "lazy_static",
  "libz-ng-sys",
  "log",
  "mimalloc",
