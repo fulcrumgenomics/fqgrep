@@ -1,23 +1,26 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{bail, ensure, Context, Result};
 use clap::builder::styling;
 use clap::{ColorChoice, Parser as ClapParser, ValueEnum};
 use env_logger::Env;
 use flate2::bufread::MultiGzDecoder;
-use flume::{Receiver, Sender, bounded};
-use fqgrep_lib::matcher::{Matcher, MatcherFactory, MatcherOpts, validate_fixed_pattern};
+use flume::{bounded, Receiver, Sender};
+use fqgrep_lib::matcher::{validate_fixed_pattern, Matcher, MatcherFactory, MatcherOpts};
 use fqgrep_lib::{is_fastq_path, is_gzip_path};
 use gzp::BUFSIZE;
 use isatty::stdout_isatty;
-use itertools::{self, Itertools, izip};
+use itertools::{self, izip, Itertools};
 use lazy_static::lazy_static;
 use parking_lot::Mutex;
 use proglog::{CountFormatterKind, ProgLog, ProgLogBuilder};
 use rayon::prelude::*;
-use seq_io::fastq::{self, OwnedRecord, Record, RecordSet};
+use seq_io::fastq::{self, OwnedRecord, Record, RecordSet, RecordSetIter, RefRecord};
 use seq_io::parallel::{parallel_fastq, Reader};
+use seq_io::parallel_record_impl;
+use serde::{Deserialize, Serialize};
+use std::io;
 use std::process::ExitCode;
 use std::{
     fs::File,
@@ -367,64 +370,150 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
         // read from standard input
         files.push(PathBuf::from_str("-").unwrap());
     }
-    // if opts.paired {
-    //     // Either an interleaved paired end FASTQ, or pairs of FASTQs
-    //     if files.len() == 1 {
-    //         // Interleaved paired end FASTQ
-    //         // The channel FASTQ record chunks are received after being read in
-    //         let rx = spawn_reader(files[0].clone(), opts.decompress);
-    //         for reads in izip!(rx.iter()) {
-    //             let paired_reads = reads
-    //                 .into_iter()
-    //                 .tuples::<(OwnedRecord, OwnedRecord)>()
-    //                 .collect_vec();
-    //             process_paired_reads(paired_reads, &matcher, &writer, &progress_logger);
-    //         }
-    //     } else {
-    //         // Pairs of FASTQ files
-    //         for file_pairs in files.chunks_exact(2) {
-    //             // The channels for R1 and R2 with FASTQ record chunks that are received after being read in
-    //             let rx1 = spawn_reader(file_pairs[0].clone(), opts.decompress);
-    //             let rx2 = spawn_reader(file_pairs[1].clone(), opts.decompress);
-    //             for (reads1, reads2) in izip!(rx1.iter(), rx2.iter()) {
-    //                 let paired_reads = reads1.into_iter().zip(reads2.into_iter()).collect_vec();
-    //                 process_paired_reads(paired_reads, &matcher, &writer, &progress_logger);
-    //             }
-    //         }
-    //     }
-    // } else {
-    // Process one FASTQ at a time
-    for file in files {
-        let mut reader = spawn_reader(file.clone(), opts.decompress);
-        parallel_fastq(
-            reader,
-            opts.threads as u32,
-            opts.threads,
-            |record, found| {
-                if let Some(progress) = &progress_logger {
-                    progress.record();
-                }
-                *found = matcher.read_match(&record);
-            },
-            |record, found| {
-                if *found {
-                    num_matches += 1;
-                }
-                if let Some(writer) = &mut maybe_writer {
-                    if color {
-                        let mut record = record.to_owned_record();
-                        matcher.color(&mut record, *found);
-                        fastq::write_to(writer, record.head(), record.seq(), record.qual());
-                    } else {
-                        fastq::write_to(writer, record.head(), record.seq(), record.qual());
+
+    if opts.paired {
+        // Either an interleaved paired end FASTQ, or pairs of FASTQs
+        if files.len() == 1 {
+            // Interleaved paired end FASTQ
+            parallel_interleaved_fastq(
+                InterleavedFastqReader {
+                    reader: spawn_reader(files.first().unwrap().clone(), opts.decompress),
+                    num_attempts: 16,
+                },
+                opts.threads as u32,
+                opts.threads,
+                |(read1, read2), found| {
+                    print!("{:?}", read1);
+                    *found = process_interleaved_reads(read1, read2, &matcher, &progress_logger);
+                },
+                |(read1, read2), found| {
+                    if *found > 0 {
+                        num_matches += 1;
                     }
-                }
-                None::<()>
-            },
-        )
-        .unwrap();
+                    if let Some(writer) = &mut maybe_writer {
+                        if color {
+                            let found1 = *found == 1;
+                            let found2 = *found == 2 || matcher.read_match(&read2);
+                            let mut read1 = read1.to_owned_record();
+                            let mut read2 = read2.to_owned_record();
+                            matcher.color(&mut read1, found1);
+                            matcher.color(&mut read2, found2);
+                            fastq::write_to(&mut *writer, read1.head(), read1.seq(), read1.qual())
+                                .unwrap();
+                            fastq::write_to(&mut *writer, read2.head(), read2.seq(), read2.qual())
+                                .unwrap();
+                        } else {
+                            fastq::write_to(&mut *writer, read1.head(), read1.seq(), read1.qual())
+                                .unwrap();
+                            fastq::write_to(&mut *writer, read2.head(), read2.seq(), read2.qual())
+                                .unwrap();
+                        }
+                    }
+                    None::<()>
+                },
+            )
+            .unwrap();
+        } else {
+            // // Pairs of FASTQ files
+            for file_pairs in files.chunks_exact(2) {
+                let reader1: fastq::Reader<Box<dyn Read + Send>> =
+                    spawn_reader(file_pairs[0].clone(), opts.decompress);
+                let reader2: fastq::Reader<Box<dyn Read + Send>> =
+                    spawn_reader(file_pairs[1].clone(), opts.decompress);
+
+                parallel_paired_fastq(
+                    PairedFastqReader { reader1, reader2 },
+                    opts.threads as u32,
+                    opts.threads,
+                    |(read1, read2), found| {
+                        *found =
+                            process_interleaved_reads(read1, read2, &matcher, &progress_logger);
+                    },
+                    |(read1, read2), found| {
+                        if *found > 0 {
+                            num_matches += 1;
+                        }
+                        if let Some(writer) = &mut maybe_writer {
+                            if color {
+                                let found1 = *found == 1;
+                                let found2 = *found == 2 || matcher.read_match(&read2);
+                                let mut read1 = read1.to_owned_record();
+                                let mut read2 = read2.to_owned_record();
+                                matcher.color(&mut read1, found1);
+                                matcher.color(&mut read2, found2);
+                                fastq::write_to(
+                                    &mut *writer,
+                                    read1.head(),
+                                    read1.seq(),
+                                    read1.qual(),
+                                )
+                                .unwrap();
+                                fastq::write_to(
+                                    &mut *writer,
+                                    read2.head(),
+                                    read2.seq(),
+                                    read2.qual(),
+                                )
+                                .unwrap();
+                            } else {
+                                fastq::write_to(
+                                    &mut *writer,
+                                    read1.head(),
+                                    read1.seq(),
+                                    read1.qual(),
+                                )
+                                .unwrap();
+                                fastq::write_to(
+                                    &mut *writer,
+                                    read2.head(),
+                                    read2.seq(),
+                                    read2.qual(),
+                                )
+                                .unwrap();
+                            }
+                        }
+                        None::<()>
+                    },
+                )
+                .unwrap();
+            }
+        }
+    } else {
+        // Process one FASTQ at a time
+        for file in files {
+            let mut reader: fastq::Reader<Box<dyn Read + Send>> =
+                spawn_reader(file.clone(), opts.decompress);
+            parallel_fastq(
+                reader,
+                opts.threads as u32,
+                opts.threads,
+                |record, found| {
+                    if let Some(progress) = &progress_logger {
+                        progress.record();
+                    }
+                    *found = matcher.read_match(&record);
+                },
+                |record, found| {
+                    if *found {
+                        num_matches += 1;
+                    }
+                    if let Some(writer) = &mut maybe_writer {
+                        if color {
+                            let mut record = record.to_owned_record();
+                            matcher.color(&mut record, *found);
+                            fastq::write_to(writer, record.head(), record.seq(), record.qual())
+                                .unwrap();
+                        } else {
+                            fastq::write_to(writer, record.head(), record.seq(), record.qual())
+                                .unwrap();
+                        }
+                    }
+                    None::<()>
+                },
+            )
+            .unwrap();
+        }
     }
-    // }
 
     if opts.paired {
         num_matches /= 2;
@@ -440,51 +529,33 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
     Ok(num_matches)
 }
 
-// /// Process a chunk of paired end records in parallel.
-// #[allow(clippy::borrowed_box)] // FIXME: remove me later and solve
-// fn process_paired_reads(
-//     reads: Vec<(OwnedRecord, OwnedRecord)>,
-//     matcher: &Box<dyn Matcher + Sync + Send>,
-//     writer: &FastqWriter,
-//     progress_logger: &Option<ProgLog>,
-// ) {
-//     let matched_reads = reads
-//         .into_par_iter()
-//         .map(|(mut read1, mut read2)| {
-//             if let Some(progress) = progress_logger {
-//                 progress.record();
-//                 progress.record();
-//             }
-//             assert_eq!(
-//                 read1.id_bytes(),
-//                 read2.id_bytes(),
-//                 "Mismatching read pair!  R1: {} R2: {}",
-//                 read1.id().unwrap(),
-//                 read2.id().unwrap()
-//             );
-//             // NB: if the output is to be colored, always call read_match on read2, regardless of
-//             // whether or not read1 had a match, so that read2 is always colored.  If the output
-//             // isn't to be colored, only search for a match in read2 if read1 does not have a match
-//             let match1 = matcher.read_match(&mut read1);
-//             let match2 = (!matcher.opts().color && match1) || matcher.read_match(&mut read2);
-//             if match1 || match2 {
-//                 Some((read1, read2))
-//             } else {
-//                 None
-//             }
-//         })
-//         .flatten()
-//         .fold(std::vec::Vec::new, |mut _matched_reads, (r1, r2)| {
-//             _matched_reads.push(r1);
-//             _matched_reads.push(r2);
-//             _matched_reads
-//         })
-//         .flatten()
-//         .collect();
-
-//     let _lock = writer.lock.lock();
-//     writer.tx.send(matched_reads).expect("Failed to send read");
-// }
+#[allow(clippy::ref_option)] // FIXME: remove me later and solve
+fn process_interleaved_reads(
+    mut read1: RefRecord,
+    mut read2: RefRecord,
+    matcher: &Box<dyn Matcher + Sync + Send>, //&(dyn Matcher + Sync + Send),
+    progress_logger: &Option<ProgLog>,
+) -> u32 {
+    if let Some(progress) = progress_logger {
+        progress.record();
+        progress.record();
+    }
+    assert_eq!(
+        read1.id_bytes(),
+        read2.id_bytes(),
+        "Mismatching read pair!  R1: {} R2: {}",
+        read1.id().unwrap(),
+        read2.id().unwrap()
+    );
+    // NB: only search for a match in read2 if read1 does not have a match
+    if matcher.read_match(&mut read1) {
+        1
+    } else if matcher.read_match(&mut read2) {
+        2
+    } else {
+        0
+    }
+}
 
 /// Parse args and set up logging / tracing
 fn setup() -> Opts {
@@ -496,6 +567,140 @@ fn setup() -> Opts {
     env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
 
     Opts::parse()
+}
+
+// Additions to seq_io::parallel for interleaved paired end FASTQ files
+
+parallel_record_impl!(
+    parallel_interleaved_fastq,
+    parallel_interleaved_fastq_init,
+    R,
+    InterleavedFastqReader<R>,
+    RecordSets,
+    (fastq::RefRecord, fastq::RefRecord),
+    fastq::Error
+);
+
+parallel_record_impl!(
+    parallel_paired_fastq,
+    parallel_paired_fastq_init,
+    R,
+    PairedFastqReader<R>,
+    RecordSets,
+    (fastq::RefRecord, fastq::RefRecord),
+    fastq::Error
+);
+
+struct InterleavedFastqReader<R: std::io::Read, P = seq_io::policy::StdPolicy> {
+    reader: fastq::Reader<R, P>,
+    num_attempts: usize,
+}
+
+impl<R, P> seq_io::parallel::Reader for InterleavedFastqReader<R, P>
+where
+    R: std::io::Read,
+    P: seq_io::policy::BufPolicy + Send,
+{
+    type DataSet = RecordSets;
+    type Err = fastq::Error;
+
+    fn fill_data(
+        &mut self,
+        record: &mut Self::DataSet,
+    ) -> Option<std::result::Result<(), Self::Err>> {
+        if record.sets.is_empty() {
+            record.sets.push(RecordSet::default());
+        }
+
+        let mut num_records = 0;
+        let result = self.reader.read_record_set(&mut record.sets[0]);
+        if let Some(Ok(())) = result {
+            num_records += record.sets[0].len();
+            if num_records % 2 == 0 {
+                return Some(Ok(()));
+            }
+        } else {
+            return result;
+        }
+
+        for i in 1..=self.num_attempts - 1 {
+            if i == record.sets.len() {
+                record.sets.push(RecordSet::default());
+            }
+            if let Some(Ok(())) = self.reader.read_record_set(&mut record.sets[i]) {
+                num_records += record.sets[0].len();
+                if num_records % 2 == 0 {
+                    return Some(Ok(()));
+                }
+            }
+        }
+        Some(Err(fastq::Error::UnexpectedEnd {
+            pos: fastq::ErrorPosition {
+                line: self.reader.position().line(),
+                id: None,
+            },
+        }))
+    }
+}
+
+struct PairedFastqReader<R: std::io::Read, P = seq_io::policy::StdPolicy> {
+    reader1: fastq::Reader<R, P>,
+    reader2: fastq::Reader<R, P>,
+}
+
+impl<R, P> seq_io::parallel::Reader for PairedFastqReader<R, P>
+where
+    R: std::io::Read,
+    P: seq_io::policy::BufPolicy + Send,
+{
+    type DataSet = RecordSets;
+    type Err = fastq::Error;
+
+    fn fill_data(
+        &mut self,
+        record: &mut Self::DataSet,
+    ) -> Option<std::result::Result<(), Self::Err>> {
+        if record.sets.is_empty() {
+            record.sets.push(RecordSet::default());
+            record.sets.push(RecordSet::default());
+        }
+
+        None
+        // FIXME: how do we ensure we get the same # of records for both sets?
+    }
+}
+
+pub struct PairedRecordSetIterator<'a> {
+    iter: Box<dyn Iterator<Item = (RefRecord<'a>, RefRecord<'a>)> + 'a>,
+}
+
+impl<'a> Iterator for PairedRecordSetIterator<'a> {
+    type Item = (RefRecord<'a>, RefRecord<'a>);
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iter.next()
+    }
+}
+
+#[derive(Default, Clone, Debug, Serialize, Deserialize)]
+struct RecordSets {
+    sets: Vec<RecordSet>,
+}
+impl<'a> std::iter::IntoIterator for &'a RecordSets {
+    type Item = (RefRecord<'a>, RefRecord<'a>);
+    type IntoIter = PairedRecordSetIterator<'a>;
+
+    #[inline]
+    fn into_iter(self) -> Self::IntoIter {
+        let iter = self
+            .sets
+            .iter()
+            .flat_map(std::iter::IntoIterator::into_iter)
+            .tuples();
+
+        PairedRecordSetIterator {
+            iter: Box::new(iter),
+        }
+    }
 }
 
 // Tests

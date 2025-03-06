@@ -46,7 +46,10 @@ parking_lot = "0.11.2"
 proglog = {version = "0.3.0", features = ["pretty_counts"]}
 rayon = "1.10.0"
 regex = {version = "1.11.1", default-features = false, features = ["perf", "perf-onepass", "perf-inline", "perf-literal"]}
-seq_io = "0.3.3"
+# for https://github.com/markschl/seq_io/pull/23
+#seq_io = "0.3.3"
+seq_io = { git = "https://github.com/nh13/seq_io.git", rev = "640160566a87b4d26e610a92026600b02218303d" }
+
 serde = {version = "1.0.218", features = ["derive"]}
 
 [build-dependencies]
@@ -55,5 +58,5 @@ built = {version ="0.5.2", features = ["git2"]}
 [dev-dependencies]
 fgoxide = "0.5.0"
 rstest = "0.12.0"
-seq_io = "0.3.3"
+seq_io = { git = "https://github.com/nh13/seq_io.git", rev = "640160566a87b4d26e610a92026600b02218303d" }
 tempfile = "3"
