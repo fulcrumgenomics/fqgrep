@@ -1,4 +1,5 @@
 use bitvec::prelude::*;
+use seq_io::fastq::RefRecord;
 use std::ops::Range;
 
 use crate::DNA_BASES;
@@ -18,8 +19,6 @@ pub struct MatcherOpts {
     /// Include the reverse complement of the bases.  The bases are said to match if they or their
     /// reverse complement contains the pattern.
     pub reverse_complement: bool,
-    /// Color the read based on the match
-    pub color: bool,
 }
 
 /// Builds a bit vector from an iterator of ranges.  The ranges may overlap each other.
@@ -148,32 +147,33 @@ pub trait Matcher {
     fn color_matched_bases(&self, bases: &[u8], quals: &[u8]) -> (Vec<u8>, Vec<u8>);
 
     /// Returns true if the read's bases match the pattern, false otherwise
-    fn read_match(&self, read: &mut OwnedRecord) -> bool {
-        let match_found = if self.opts().invert_match {
-            self.bases_match(read.seq())
+    #[inline]
+    fn read_match(&self, read: &RefRecord) -> bool {
+        let bases_match = self.bases_match(read.seq());
+        if self.opts().invert_match {
+            bases_match
                 && (!self.opts().reverse_complement
                     || self.bases_match(&reverse_complement(read.seq())))
         } else {
-            self.bases_match(read.seq())
+            bases_match
                 || (self.opts().reverse_complement
                     && self.bases_match(&reverse_complement(read.seq())))
-        };
-
-        if self.opts().color {
-            if match_found {
-                let (seq, qual) = self.color_matched_bases(&read.seq, &read.qual);
-                read.head = color_head(&read.head);
-                read.seq = seq;
-                read.qual = qual;
-            } else {
-                // always color, in case the read is paired
-                read.head = color_background(&read.head);
-                read.seq = color_background(&read.seq);
-                read.qual = color_background(&read.qual);
-            }
         }
+    }
 
-        match_found
+    #[inline]
+    fn color(&self, read: &mut OwnedRecord, match_found: bool) {
+        if match_found {
+            let (seq, qual) = self.color_matched_bases(&read.seq, &read.qual);
+            read.head = color_head(&read.head);
+            read.seq = seq;
+            read.qual = qual;
+        } else {
+            // always color, in case the read is paired
+            read.head = color_background(&read.head);
+            read.seq = color_background(&read.seq);
+            read.qual = color_background(&read.qual);
+        }
     }
 }
 
@@ -184,6 +184,7 @@ pub struct FixedStringMatcher {
 }
 
 impl Matcher for FixedStringMatcher {
+    #[inline]
     fn bases_match(&self, bases: &[u8]) -> bool {
         bases.find(&self.pattern).is_some() != self.opts.invert_match
     }
@@ -208,6 +209,7 @@ impl Matcher for FixedStringMatcher {
         }
     }
 
+    #[inline]
     fn opts(&self) -> MatcherOpts {
         self.opts
     }
@@ -227,6 +229,7 @@ pub struct FixedStringSetMatcher {
 }
 
 impl Matcher for FixedStringSetMatcher {
+    #[inline]
     fn bases_match(&self, bases: &[u8]) -> bool {
         self.patterns
             .iter()
@@ -262,6 +265,7 @@ impl Matcher for FixedStringSetMatcher {
         }
     }
 
+    #[inline]
     fn opts(&self) -> MatcherOpts {
         self.opts
     }
@@ -298,6 +302,7 @@ impl RegexMatcher {
 }
 
 impl Matcher for RegexMatcher {
+    #[inline]
     fn bases_match(&self, bases: &[u8]) -> bool {
         self.regex.is_match(bases) != self.opts.invert_match
     }
@@ -320,6 +325,7 @@ impl Matcher for RegexMatcher {
         }
     }
 
+    #[inline]
     fn opts(&self) -> MatcherOpts {
         self.opts
     }
@@ -343,6 +349,7 @@ impl RegexSetMatcher {
             .map(|p| p.as_ref().to_string())
             .collect();
         let regex_set = RegexSetBuilder::new(string_patterns.clone())
+            .dfa_size_limit(usize::MAX)
             .build()
             .unwrap();
         let regex_matchers: Vec<RegexMatcher> = string_patterns
@@ -358,6 +365,7 @@ impl RegexSetMatcher {
 }
 
 impl Matcher for RegexSetMatcher {
+    #[inline]
     fn bases_match(&self, bases: &[u8]) -> bool {
         self.regex_set.is_match(bases) != self.opts.invert_match
     }
@@ -384,6 +392,7 @@ impl Matcher for RegexSetMatcher {
         }
     }
 
+    #[inline]
     fn opts(&self) -> MatcherOpts {
         self.opts
     }
@@ -477,7 +486,6 @@ pub mod tests {
             let opts = MatcherOpts {
                 invert_match,
                 reverse_complement,
-                color: false,
             };
             let matcher = FixedStringMatcher::new(pattern, opts);
             let mut read_record = write_owned_record(seq);
@@ -516,7 +524,6 @@ pub mod tests {
             let opts = MatcherOpts {
                 invert_match,
                 reverse_complement,
-                color: false,
             };
             let matcher = FixedStringSetMatcher::new(patterns.iter(), opts);
             let mut read_record = write_owned_record(seq);
@@ -551,7 +558,6 @@ pub mod tests {
             let opts = MatcherOpts {
                 invert_match,
                 reverse_complement,
-                color: false,
             };
 
             let matcher = RegexMatcher::new(pattern, opts);
@@ -591,7 +597,6 @@ pub mod tests {
             let opts = MatcherOpts {
                 invert_match,
                 reverse_complement,
-                color: false,
             };
 
             let matcher = RegexSetMatcher::new(patterns.iter(), opts);
