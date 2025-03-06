@@ -372,7 +372,7 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
                 opts.threads as u32,
                 opts.threads,
                 |(read1, read2), found| {
-                    *found = process_interleaved_reads(read1, read2, &matcher, &progress_logger);
+                    *found = process_paired_reads(&read1, &read2, &matcher, &progress_logger);
                 },
                 |(read1, read2), found| {
                     if *found > 0 {
@@ -434,8 +434,7 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
                     opts.threads as u32,
                     opts.threads,
                     |(read1, read2), found| {
-                        *found =
-                            process_interleaved_reads(read1, read2, &matcher, &progress_logger);
+                        *found = process_paired_reads(&read1, &read2, &matcher, &progress_logger);
                     },
                     |(read1, read2), found| {
                         if *found > 0 {
@@ -534,9 +533,10 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
 }
 
 #[allow(clippy::ref_option)] // FIXME: remove me later and solve
-fn process_interleaved_reads(
-    mut read1: RefRecord,
-    mut read2: RefRecord,
+#[allow(clippy::borrowed_box)] // FIXME: remove me later and solve
+fn process_paired_reads(
+    read1: &RefRecord,
+    read2: &RefRecord,
     matcher: &Box<dyn Matcher + Sync + Send>, //&(dyn Matcher + Sync + Send),
     progress_logger: &Option<ProgLog>,
 ) -> u32 {
@@ -552,9 +552,9 @@ fn process_interleaved_reads(
         read2.id().unwrap()
     );
     // NB: only search for a match in read2 if read1 does not have a match
-    if matcher.read_match(&mut read1) {
+    if matcher.read_match(read1) {
         1
-    } else if matcher.read_match(&mut read2) {
+    } else if matcher.read_match(read2) {
         2
     } else {
         0
