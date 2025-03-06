@@ -7,6 +7,7 @@
 )]
 pub mod color;
 pub mod matcher;
+pub mod seq_io;
 use lazy_static::lazy_static;
 use std::{borrow::Borrow, path::Path};
 

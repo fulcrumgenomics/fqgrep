@@ -1,23 +1,22 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{Context, Result, bail, ensure};
 use clap::builder::styling;
 use clap::{ColorChoice, Parser as ClapParser, ValueEnum};
 use env_logger::Env;
 use flate2::bufread::MultiGzDecoder;
-use fqgrep_lib::matcher::{validate_fixed_pattern, Matcher, MatcherFactory, MatcherOpts};
+use fqgrep_lib::matcher::{Matcher, MatcherFactory, MatcherOpts, validate_fixed_pattern};
+use fqgrep_lib::seq_io::{
+    InterleavedFastqReader, PairedFastqReader, parallel_interleaved_fastq, parallel_paired_fastq,
+};
 use fqgrep_lib::{is_fastq_path, is_gzip_path};
 use gzp::BUFSIZE;
 use isatty::stdout_isatty;
-use itertools::{self, Itertools};
 use lazy_static::lazy_static;
 use proglog::{CountFormatterKind, ProgLog, ProgLogBuilder};
-use seq_io::fastq::{self, Record, RecordSet, RefRecord};
+use seq_io::fastq::{self, Record, RefRecord};
 use seq_io::parallel::parallel_fastq;
-use seq_io::parallel_record_impl;
-use serde::{Deserialize, Serialize};
-use std::io;
 use std::process::ExitCode;
 use std::{
     fs::File,
@@ -572,142 +571,6 @@ fn setup() -> Opts {
     env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
 
     Opts::parse()
-}
-
-// Additions to seq_io::parallel for interleaved paired end FASTQ files
-
-parallel_record_impl!(
-    parallel_interleaved_fastq,
-    parallel_interleaved_fastq_init,
-    R,
-    InterleavedFastqReader<R>,
-    InterleavedRecordSet,
-    (fastq::RefRecord, fastq::RefRecord),
-    fastq::Error
-);
-
-struct InterleavedFastqReader<R: std::io::Read, P = seq_io::policy::StdPolicy> {
-    reader: fastq::Reader<R, P>,
-}
-
-impl<R, P> seq_io::parallel::Reader for InterleavedFastqReader<R, P>
-where
-    R: std::io::Read,
-    P: seq_io::policy::BufPolicy + Send,
-{
-    type DataSet = InterleavedRecordSet;
-    type Err = fastq::Error;
-
-    fn fill_data(
-        &mut self,
-        record: &mut Self::DataSet,
-    ) -> Option<std::result::Result<(), Self::Err>> {
-        self.reader.read_record_set_limited(&mut record.set, 65536)
-    }
-}
-
-#[derive(Default, Clone, Debug, Serialize, Deserialize)]
-struct InterleavedRecordSet {
-    set: RecordSet,
-}
-
-impl<'a> std::iter::IntoIterator for &'a InterleavedRecordSet {
-    type Item = (RefRecord<'a>, RefRecord<'a>);
-    type IntoIter = PairedRecordSetIterator<'a>;
-
-    #[inline]
-    fn into_iter(self) -> Self::IntoIter {
-        let iter = self.set.into_iter().tuples();
-        // TODO: check even #
-
-        PairedRecordSetIterator {
-            iter: Box::new(iter),
-        }
-    }
-}
-
-parallel_record_impl!(
-    parallel_paired_fastq,
-    parallel_paired_fastq_init,
-    R,
-    PairedFastqReader<R>,
-    RecordSetTuple,
-    (fastq::RefRecord, fastq::RefRecord),
-    fastq::Error
-);
-
-struct PairedFastqReader<R: std::io::Read, P = seq_io::policy::StdPolicy> {
-    reader1: fastq::Reader<R, P>,
-    reader2: fastq::Reader<R, P>,
-}
-
-impl<R, P> seq_io::parallel::Reader for PairedFastqReader<R, P>
-where
-    R: std::io::Read,
-    P: seq_io::policy::BufPolicy + Send,
-{
-    type DataSet = RecordSetTuple;
-    type Err = fastq::Error;
-
-    fn fill_data(
-        &mut self,
-        record: &mut Self::DataSet,
-    ) -> Option<std::result::Result<(), Self::Err>> {
-        let result1 = self
-            .reader1
-            .read_record_set_limited(&mut record.first, 65536);
-        let result2 = self
-            .reader2
-            .read_record_set_limited(&mut record.second, 65536);
-
-        match (result1, result2) {
-            (None, None) => None,
-            (Some(Ok(())), Some(Ok(()))) => Some(Ok(())),
-            (_, Some(Err(e))) | (Some(Err(e)), _) => Some(Err(e)),
-            (None, _) => Some(Err(fastq::Error::UnexpectedEnd {
-                pos: fastq::ErrorPosition {
-                    line: self.reader2.position().line(),
-                    id: None,
-                },
-            })),
-            (_, None) => Some(Err(fastq::Error::UnexpectedEnd {
-                pos: fastq::ErrorPosition {
-                    line: self.reader1.position().line(),
-                    id: None,
-                },
-            })),
-        }
-        // TODO: check the same # of reads
-    }
-}
-
-pub struct PairedRecordSetIterator<'a> {
-    iter: Box<dyn Iterator<Item = (RefRecord<'a>, RefRecord<'a>)> + 'a>,
-}
-
-impl<'a> Iterator for PairedRecordSetIterator<'a> {
-    type Item = (RefRecord<'a>, RefRecord<'a>);
-    fn next(&mut self) -> Option<Self::Item> {
-        self.iter.next()
-    }
-}
-
-#[derive(Default, Clone, Debug, Serialize, Deserialize)]
-struct RecordSetTuple {
-    first: RecordSet,
-    second: RecordSet,
-}
-impl<'a> std::iter::IntoIterator for &'a RecordSetTuple {
-    type Item = (RefRecord<'a>, RefRecord<'a>);
-    type IntoIter = PairedRecordSetIterator<'a>;
-
-    #[inline]
-    fn into_iter(self) -> Self::IntoIter {
-        let iter = self.first.into_iter().zip(self.second.into_iter());
-        PairedRecordSetIterator {
-            iter: Box::new(iter),
-        }
-    }
 }
 
 // Tests

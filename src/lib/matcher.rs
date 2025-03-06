@@ -2,11 +2,11 @@ use bitvec::prelude::*;
 use seq_io::fastq::RefRecord;
 use std::ops::Range;
 
-use crate::color::{color_background, color_head};
-use crate::color::{COLOR_BACKGROUND, COLOR_BASES, COLOR_QUALS};
-use crate::reverse_complement;
 use crate::DNA_BASES;
-use anyhow::{bail, Context, Result};
+use crate::color::{COLOR_BACKGROUND, COLOR_BASES, COLOR_QUALS};
+use crate::color::{color_background, color_head};
+use crate::reverse_complement;
+use anyhow::{Context, Result, bail};
 use bstr::ByteSlice;
 use regex::bytes::{Regex, RegexBuilder, RegexSet, RegexSetBuilder};
 use seq_io::fastq::{OwnedRecord, Record};
@@ -161,6 +161,8 @@ pub trait Matcher {
         }
     }
 
+    /// Adds ANSI color codes to the read's header, sequence, and quality based on where they
+    /// match the pattern(s).
     #[inline]
     fn color(&self, read: &mut OwnedRecord, match_found: bool) {
         if match_found {
