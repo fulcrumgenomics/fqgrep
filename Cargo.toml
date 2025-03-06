@@ -33,7 +33,6 @@ clap = { version = "4.5.31", features = ["derive", "unstable-markdown"] }
 csv = "^1, <1.2"
 env_logger = "0.9.3"
 flate2 = {version = "1.1.0", default-features = false, features = ["zlib-ng"]}
-flume = "0.11.1"
 gzp = "1.0.1"
 isatty = "0.1.9"
 itertools = "0.10.5"
@@ -44,7 +43,6 @@ mimalloc = {version = "0.1.43", default-features = false}
 num_cpus = "1.16.0"
 parking_lot = "0.11.2"
 proglog = {version = "0.3.0", features = ["pretty_counts"]}
-rayon = "1.10.0"
 regex = {version = "1.11.1", default-features = false, features = ["perf", "perf-onepass", "perf-inline", "perf-literal"]}
 # for https://github.com/markschl/seq_io/pull/23
 #seq_io = "0.3.3"

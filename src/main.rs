@@ -1,23 +1,20 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{Context, Result, bail, ensure};
 use clap::builder::styling;
 use clap::{ColorChoice, Parser as ClapParser, ValueEnum};
 use env_logger::Env;
 use flate2::bufread::MultiGzDecoder;
-use flume::{bounded, Receiver, Sender};
-use fqgrep_lib::matcher::{validate_fixed_pattern, Matcher, MatcherFactory, MatcherOpts};
+use fqgrep_lib::matcher::{Matcher, MatcherFactory, MatcherOpts, validate_fixed_pattern};
 use fqgrep_lib::{is_fastq_path, is_gzip_path};
 use gzp::BUFSIZE;
 use isatty::stdout_isatty;
-use itertools::{self, izip, Itertools};
+use itertools::{self, Itertools};
 use lazy_static::lazy_static;
-use parking_lot::Mutex;
 use proglog::{CountFormatterKind, ProgLog, ProgLogBuilder};
-use rayon::prelude::*;
-use seq_io::fastq::{self, OwnedRecord, Record, RecordSet, RecordSetIter, RefRecord};
-use seq_io::parallel::{parallel_fastq, Reader};
+use seq_io::fastq::{self, Record, RecordSet, RefRecord};
+use seq_io::parallel::parallel_fastq;
 use seq_io::parallel_record_impl;
 use serde::{Deserialize, Serialize};
 use std::io;
@@ -28,12 +25,6 @@ use std::{
     path::PathBuf,
     str::FromStr,
 };
-
-/// The number of reads in a chunk
-const CHUNKSIZE: usize = 5000; // * num_cpus::get();
-/// The number of chunks allowed in a channel
-const READER_CHANNEL_SIZE: usize = 100;
-const WRITER_CHANNEL_SIZE: usize = 2000;
 
 lazy_static! {
     /// Return the number of cpus as a String
@@ -378,7 +369,6 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
             parallel_interleaved_fastq(
                 InterleavedFastqReader {
                     reader: spawn_reader(files.first().unwrap().clone(), opts.decompress),
-                    num_attempts: 16,
                 },
                 opts.threads as u32,
                 opts.threads,
@@ -481,7 +471,7 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
     } else {
         // Process one FASTQ at a time
         for file in files {
-            let mut reader: fastq::Reader<Box<dyn Read + Send>> =
+            let reader: fastq::Reader<Box<dyn Read + Send>> =
                 spawn_reader(file.clone(), opts.decompress);
             parallel_fastq(
                 reader,
@@ -576,24 +566,13 @@ parallel_record_impl!(
     parallel_interleaved_fastq_init,
     R,
     InterleavedFastqReader<R>,
-    RecordSets,
-    (fastq::RefRecord, fastq::RefRecord),
-    fastq::Error
-);
-
-parallel_record_impl!(
-    parallel_paired_fastq,
-    parallel_paired_fastq_init,
-    R,
-    PairedFastqReader<R>,
-    RecordSets,
+    InterleavedRecordSet,
     (fastq::RefRecord, fastq::RefRecord),
     fastq::Error
 );
 
 struct InterleavedFastqReader<R: std::io::Read, P = seq_io::policy::StdPolicy> {
     reader: fastq::Reader<R, P>,
-    num_attempts: usize,
 }
 
 impl<R, P> seq_io::parallel::Reader for InterleavedFastqReader<R, P>
@@ -601,47 +580,46 @@ where
     R: std::io::Read,
     P: seq_io::policy::BufPolicy + Send,
 {
-    type DataSet = RecordSets;
+    type DataSet = InterleavedRecordSet;
     type Err = fastq::Error;
 
     fn fill_data(
         &mut self,
         record: &mut Self::DataSet,
     ) -> Option<std::result::Result<(), Self::Err>> {
-        if record.sets.is_empty() {
-            record.sets.push(RecordSet::default());
-        }
-
-        let mut num_records = 0;
-        let result = self.reader.read_record_set(&mut record.sets[0]);
-        if let Some(Ok(())) = result {
-            num_records += record.sets[0].len();
-            if num_records % 2 == 0 {
-                return Some(Ok(()));
-            }
-        } else {
-            return result;
-        }
-
-        for i in 1..=self.num_attempts - 1 {
-            if i == record.sets.len() {
-                record.sets.push(RecordSet::default());
-            }
-            if let Some(Ok(())) = self.reader.read_record_set(&mut record.sets[i]) {
-                num_records += record.sets[0].len();
-                if num_records % 2 == 0 {
-                    return Some(Ok(()));
-                }
-            }
-        }
-        Some(Err(fastq::Error::UnexpectedEnd {
-            pos: fastq::ErrorPosition {
-                line: self.reader.position().line(),
-                id: None,
-            },
-        }))
+        self.reader.read_record_set_limited(&mut record.set, 65536)
     }
 }
+
+#[derive(Default, Clone, Debug, Serialize, Deserialize)]
+struct InterleavedRecordSet {
+    set: RecordSet,
+}
+
+impl<'a> std::iter::IntoIterator for &'a InterleavedRecordSet {
+    type Item = (RefRecord<'a>, RefRecord<'a>);
+    type IntoIter = PairedRecordSetIterator<'a>;
+
+    #[inline]
+    fn into_iter(self) -> Self::IntoIter {
+        let iter = self.set.into_iter().tuples();
+        // TODO: check even #
+
+        PairedRecordSetIterator {
+            iter: Box::new(iter),
+        }
+    }
+}
+
+parallel_record_impl!(
+    parallel_paired_fastq,
+    parallel_paired_fastq_init,
+    R,
+    PairedFastqReader<R>,
+    RecordSetTuple,
+    (fastq::RefRecord, fastq::RefRecord),
+    fastq::Error
+);
 
 struct PairedFastqReader<R: std::io::Read, P = seq_io::policy::StdPolicy> {
     reader1: fastq::Reader<R, P>,
@@ -653,20 +631,38 @@ where
     R: std::io::Read,
     P: seq_io::policy::BufPolicy + Send,
 {
-    type DataSet = RecordSets;
+    type DataSet = RecordSetTuple;
     type Err = fastq::Error;
 
     fn fill_data(
         &mut self,
         record: &mut Self::DataSet,
     ) -> Option<std::result::Result<(), Self::Err>> {
-        if record.sets.is_empty() {
-            record.sets.push(RecordSet::default());
-            record.sets.push(RecordSet::default());
-        }
+        let result1 = self
+            .reader1
+            .read_record_set_limited(&mut record.first, 65536);
+        let result2 = self
+            .reader2
+            .read_record_set_limited(&mut record.second, 65536);
 
-        None
-        // FIXME: how do we ensure we get the same # of records for both sets?
+        match (result1, result2) {
+            (None, None) => None,
+            (Some(Ok(())), Some(Ok(()))) => Some(Ok(())),
+            (_, Some(Err(e))) | (Some(Err(e)), _) => Some(Err(e)),
+            (None, _) => Some(Err(fastq::Error::UnexpectedEnd {
+                pos: fastq::ErrorPosition {
+                    line: self.reader2.position().line(),
+                    id: None,
+                },
+            })),
+            (_, None) => Some(Err(fastq::Error::UnexpectedEnd {
+                pos: fastq::ErrorPosition {
+                    line: self.reader1.position().line(),
+                    id: None,
+                },
+            })),
+        }
+        // TODO: check the same # of reads
     }
 }
 
@@ -682,21 +678,17 @@ impl<'a> Iterator for PairedRecordSetIterator<'a> {
 }
 
 #[derive(Default, Clone, Debug, Serialize, Deserialize)]
-struct RecordSets {
-    sets: Vec<RecordSet>,
+struct RecordSetTuple {
+    first: RecordSet,
+    second: RecordSet,
 }
-impl<'a> std::iter::IntoIterator for &'a RecordSets {
+impl<'a> std::iter::IntoIterator for &'a RecordSetTuple {
     type Item = (RefRecord<'a>, RefRecord<'a>);
     type IntoIter = PairedRecordSetIterator<'a>;
 
     #[inline]
     fn into_iter(self) -> Self::IntoIter {
-        let iter = self
-            .sets
-            .iter()
-            .flat_map(std::iter::IntoIterator::into_iter)
-            .tuples();
-
+        let iter = self.first.into_iter().zip(self.second.into_iter());
         PairedRecordSetIterator {
             iter: Box::new(iter),
         }
