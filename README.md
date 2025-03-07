@@ -5,6 +5,7 @@
   <img src="https://img.shields.io/crates/l/fqgrep.svg" alt="license">
   <a href="https://crates.io/crates/fqgrep"><img src="https://img.shields.io/crates/v/fqgrep.svg?colorB=319e8c" alt="Version info"></a>
   <a href="http://bioconda.github.io/recipes/fqgrep/README.html"><img src="https://img.shields.io/badge/install%20with-bioconda-brightgreen.svg?style=flat" alt="Install with bioconda"></a>
+  <a href="https://doi.org/10.5281/zenodo.14985002"><img src="https://zenodo.org/badge/416465549.svg" alt="zenodo"></a>
   <br>
   Grep for FASTQ files.
 </p>
