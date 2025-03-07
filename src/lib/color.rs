@@ -10,9 +10,9 @@ pub const COLOR_HEAD: Color = Color::Fixed(30);
 pub const COLOR_BACKGROUND: Color = Color::Fixed(240);
 
 /// Colors the text with the given color
-pub fn color(text: &[u8], colour: &Color) -> Vec<u8> {
+pub fn color(text: &[u8], color: &Color) -> Vec<u8> {
     let mut colored: Vec<u8> = Vec::with_capacity(text.len());
-    colour.paint(text).write_to(&mut colored).unwrap();
+    color.paint(text).write_to(&mut colored).unwrap();
     colored
 }
 
