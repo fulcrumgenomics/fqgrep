@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout sources
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
 
       - name: Install stable toolchain
         uses: actions-rs/toolchain@v1
@@ -22,18 +22,46 @@ jobs:
 
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v1
-
+      
       - name: Run cargo check
         uses: actions-rs/cargo@v1
         with:
           command: check
+      
+      - name: Run cargo build
+        uses: actions-rs/cargo@v1
+        with:
+          command: build
+
+      - name: Append usage to the README.md
+        shell: bash
+        run: .github/scripts/update-docs.sh
+
+      - name: Verify no unstaged changes
+        shell: bash
+        run: |
+          if [[ "$(git status --porcelain)" != "" ]]; then
+            echo ----------------------------------------
+            echo git status
+            echo ----------------------------------------
+            git status
+            echo ----------------------------------------
+            echo git diff
+            echo ----------------------------------------
+            git diff
+            echo ----------------------------------------
+            echo Troubleshooting
+            echo ----------------------------------------
+            echo "::error::Unstaged changes detected. You probably need to update the usage in the README.md.  Use `.github/scripts/update-docs`."
+            exit 1
+          fi
 
   lints:
     name: Lints
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout sources
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
 
       - name: Install stable toolchain
         uses: actions-rs/toolchain@v1
