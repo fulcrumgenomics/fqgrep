@@ -35,7 +35,7 @@ jobs:
 
       - name: Append usage to the README.md
         shell: bash
-        run: ./update-docs.sh
+        run: .github/scripts/update-docs.sh
 
       - name: Verify no unstaged changes
         shell: bash
