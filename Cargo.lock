@@ -1167,8 +1167,9 @@ dependencies = [
 
 [[package]]
 name = "seq_io"
-version = "0.3.3"
-source = "git+https://github.com/nh13/seq_io.git?rev=640160566a87b4d26e610a92026600b02218303d#640160566a87b4d26e610a92026600b02218303d"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1303559e530ee83c1d7a8593a033792c2a29217544a5c48563e116e158d76ade"
 dependencies = [
  "buffer-redux",
  "crossbeam-utils",
