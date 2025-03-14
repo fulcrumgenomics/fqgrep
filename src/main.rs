@@ -362,9 +362,10 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
         if files.len() == 1 {
             // Interleaved paired end FASTQ
             parallel_interleaved_fastq(
-                InterleavedFastqReader {
-                    reader: spawn_reader(files.first().unwrap().clone(), opts.decompress),
-                },
+                InterleavedFastqReader::new(spawn_reader(
+                    files.first().unwrap().clone(),
+                    opts.decompress,
+                )),
                 opts.threads as u32,
                 opts.threads,
                 |(read1, read2), found| {
@@ -426,7 +427,7 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
                     spawn_reader(file_pairs[1].clone(), opts.decompress);
 
                 parallel_paired_fastq(
-                    PairedFastqReader { reader1, reader2 },
+                    PairedFastqReader::new(reader1, reader2),
                     opts.threads as u32,
                     opts.threads,
                     |(read1, read2), found| {

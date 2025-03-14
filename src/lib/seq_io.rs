@@ -31,6 +31,20 @@ parallel_record_impl!(
 /// Read that reads an interleaved paired end FASTQ file.
 pub struct InterleavedFastqReader<R: std::io::Read, P = seq_io::policy::StdPolicy> {
     pub reader: fastq::Reader<R, P>,
+    rset_len: Option<usize>,
+}
+
+impl<R, P> InterleavedFastqReader<R, P>
+where
+    R: std::io::Read,
+    P: seq_io::policy::BufPolicy + Send,
+{
+    pub fn new(reader: fastq::Reader<R, P>) -> Self {
+        Self {
+            reader,
+            rset_len: None,
+        }
+    }
 }
 
 impl<R, P> seq_io::parallel::Reader for InterleavedFastqReader<R, P>
@@ -45,8 +59,15 @@ where
         &mut self,
         record: &mut Self::DataSet,
     ) -> Option<std::result::Result<(), Self::Err>> {
-        let result = self.reader.read_record_set_limited(&mut record.set, 65536);
+        // self.rset_len will be None when fill_data is called for the first time, and from then
+        // on it will have a value.
+        let result = self
+            .reader
+            .read_record_set_exact(&mut record.set, self.rset_len);
         if let Some(Ok(())) = result {
+            if self.rset_len.is_none() {
+                self.rset_len = Some(record.set.len());
+            }
             if record.set.len() % 2 != 0 {
                 return Some(Err(fastq::Error::Io(std::io::Error::other(
                     "FASTQ file does not have an even number of records.",
@@ -57,13 +78,14 @@ where
     }
 }
 
-/// Thin wrapper around a RecordSet that contains an even number of records, with interleaved read
-/// pairs.
+/// Thin wrapper around a ``RecordSet`` that contains an even number of records, with interleaved
+/// read spairs.
 #[derive(Default, Clone, Debug, Serialize, Deserialize)]
 pub struct InterleavedRecordSet {
     set: RecordSet,
 }
 
+#[allow(clippy::into_iter_without_iter)]
 impl<'a> std::iter::IntoIterator for &'a InterleavedRecordSet {
     type Item = (RefRecord<'a>, RefRecord<'a>);
     type IntoIter = PairedRecordSetIterator<'a>;
@@ -77,6 +99,8 @@ impl<'a> std::iter::IntoIterator for &'a InterleavedRecordSet {
     }
 }
 
+impl InterleavedRecordSet {}
+
 parallel_record_impl!(
     parallel_paired_fastq,
     parallel_paired_fastq_init,
@@ -88,9 +112,28 @@ parallel_record_impl!(
 );
 
 /// Reader for paired ends that are spread across two FASTQ files.
+/// The number of records read from each file is synchronized, but the number is not known until
+/// after reading the first time, when we determine how many reads can fit into the fixed size
+/// buffer.  While the buffer may grow later for each `RecordSet` later (if later reads are
+/// longer), this is a good approximation given the buffer size.
 pub struct PairedFastqReader<R: std::io::Read, P = seq_io::policy::StdPolicy> {
-    pub reader1: fastq::Reader<R, P>,
-    pub reader2: fastq::Reader<R, P>,
+    reader1: fastq::Reader<R, P>,
+    reader2: fastq::Reader<R, P>,
+    rset_len: Option<usize>,
+}
+
+impl<R, P> PairedFastqReader<R, P>
+where
+    R: std::io::Read,
+    P: seq_io::policy::BufPolicy + Send,
+{
+    pub fn new(reader1: fastq::Reader<R, P>, reader2: fastq::Reader<R, P>) -> Self {
+        Self {
+            reader1,
+            reader2,
+            rset_len: None,
+        }
+    }
 }
 
 impl<R, P> seq_io::parallel::Reader for PairedFastqReader<R, P>
@@ -105,12 +148,17 @@ where
         &mut self,
         record: &mut Self::DataSet,
     ) -> Option<std::result::Result<(), Self::Err>> {
+        // self.rset_len will be None when fill_data is called for the first time, and from then
+        // on it will have a value.
         let result1 = self
             .reader1
-            .read_record_set_limited(&mut record.first, 65536);
+            .read_record_set_exact(&mut record.first, self.rset_len);
+        if result1.is_some() {
+            self.rset_len = Some(record.first.len());
+        }
         let result2 = self
             .reader2
-            .read_record_set_limited(&mut record.second, 65536);
+            .read_record_set_exact(&mut record.second, self.rset_len);
 
         match (result1, result2) {
             (None, None) => None,
@@ -122,7 +170,7 @@ where
                         || "No more records".to_string(),
                         |r| String::from_utf8_lossy(r.head()).to_string(),
                     );
-                    let head2 = record.first.into_iter().last().map_or_else(
+                    let head2 = record.second.into_iter().last().map_or_else(
                         || "No more records".to_string(),
                         |r| String::from_utf8_lossy(r.head()).to_string(),
                     );
@@ -168,6 +216,7 @@ pub struct RecordSetTuple {
     second: RecordSet,
 }
 
+#[allow(clippy::into_iter_without_iter)]
 impl<'a> std::iter::IntoIterator for &'a RecordSetTuple {
     type Item = (RefRecord<'a>, RefRecord<'a>);
     type IntoIter = PairedRecordSetIterator<'a>;
