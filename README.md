@@ -38,8 +38,16 @@ cargo install --path .
 
 ## Usage
 
+To match a single pattern in a single FASTQ:
+
 ```console
-fqgrep -r 'GACGAGATTA' -a 'GACGTGATTA' --r1-fastq /data/testR1.fastq.gz  --r2-fastq /data/testR2.fastq.gz -o ./test_out -t 28
+fqgrep 'GACGAGATTA' /data/test.fastq.gz
+```
+
+To match two patterns across two FASTQs treating them as paired end:
+
+```console
+fqgrep  --paired --threads 10 --regexp 'GACGAGATTA' --regexp 'GACGTGATTA' /data/testR1.fastq.gz /data/testR2.fastq.gz
 ```
 
 ## Help
