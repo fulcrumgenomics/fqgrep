@@ -79,7 +79,7 @@ where
 }
 
 /// Thin wrapper around a ``RecordSet`` that contains an even number of records, with interleaved
-/// read spairs.
+/// read pairs.
 #[derive(Default, Clone, Debug, Serialize, Deserialize)]
 pub struct InterleavedRecordSet {
     set: RecordSet,
@@ -98,8 +98,6 @@ impl<'a> std::iter::IntoIterator for &'a InterleavedRecordSet {
         }
     }
 }
-
-impl InterleavedRecordSet {}
 
 parallel_record_impl!(
     parallel_paired_fastq,
@@ -136,6 +134,58 @@ where
     }
 }
 
+impl<R, P> PairedFastqReader<R, P>
+where
+    R: std::io::Read,
+    P: seq_io::policy::BufPolicy + Send,
+{
+    fn validate_paired_results(
+        &self,
+        result1: Option<Result<(), fastq::Error>>,
+        result2: Option<Result<(), fastq::Error>>,
+        record: &RecordSetTuple,
+    ) -> Option<Result<(), fastq::Error>> {
+        match (result1, result2) {
+            (None, None) => None,
+            (Some(Ok(())), Some(Ok(()))) => self.check_sync(record),
+            (_, Some(Err(e))) | (Some(Err(e)), _) => Some(Err(e)),
+            (None, _) => Some(Err(self.unexpected_end_error(&self.reader2))),
+            (_, None) => Some(Err(self.unexpected_end_error(&self.reader1))),
+        }
+    }
+
+    fn check_sync(&self, record: &RecordSetTuple) -> Option<Result<(), fastq::Error>> {
+        if record.first.len() == record.second.len() {
+            Some(Ok(()))
+        } else {
+            Some(Err(self.create_sync_error(record)))
+        }
+    }
+
+    fn create_sync_error(&self, record: &RecordSetTuple) -> fastq::Error {
+        let head1: String = record.first.into_iter().last().map_or_else(
+            || "No more records".to_string(),
+            |r| String::from_utf8_lossy(r.head()).to_string(),
+        );
+        let head2 = record.second.into_iter().last().map_or_else(
+            || "No more records".to_string(),
+            |r| String::from_utf8_lossy(r.head()).to_string(),
+        );
+        fastq::Error::Io(std::io::Error::other(format!(
+            "FASTQ files out of sync.  Last records:\n\t{head1}\n\t{head2}"
+        )))
+    }
+
+    fn unexpected_end_error(&self, reader: &fastq::Reader<R, P>) -> fastq::Error {
+        fastq::Error::UnexpectedEnd {
+            pos: fastq::ErrorPosition {
+                line: reader.position().line(),
+                id: None,
+            },
+        }
+    }
+}
+
 impl<R, P> seq_io::parallel::Reader for PairedFastqReader<R, P>
 where
     R: std::io::Read,
@@ -160,39 +210,7 @@ where
             .reader2
             .read_record_set_exact(&mut record.second, self.rset_len);
 
-        match (result1, result2) {
-            (None, None) => None,
-            (Some(Ok(())), Some(Ok(()))) => {
-                if record.first.len() == record.second.len() {
-                    Some(Ok(()))
-                } else {
-                    let head1: String = record.first.into_iter().last().map_or_else(
-                        || "No more records".to_string(),
-                        |r| String::from_utf8_lossy(r.head()).to_string(),
-                    );
-                    let head2 = record.second.into_iter().last().map_or_else(
-                        || "No more records".to_string(),
-                        |r| String::from_utf8_lossy(r.head()).to_string(),
-                    );
-                    Some(Err(fastq::Error::Io(std::io::Error::other(format!(
-                        "FASTQ files out of sync.  Last records:\n\t{head1}\n\t{head2}"
-                    )))))
-                }
-            }
-            (_, Some(Err(e))) | (Some(Err(e)), _) => Some(Err(e)),
-            (None, _) => Some(Err(fastq::Error::UnexpectedEnd {
-                pos: fastq::ErrorPosition {
-                    line: self.reader2.position().line(),
-                    id: None,
-                },
-            })),
-            (_, None) => Some(Err(fastq::Error::UnexpectedEnd {
-                pos: fastq::ErrorPosition {
-                    line: self.reader1.position().line(),
-                    id: None,
-                },
-            })),
-        }
+        self.validate_paired_results(result1, result2, record)
     }
 }
 

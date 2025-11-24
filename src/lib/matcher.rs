@@ -1,3 +1,4 @@
+use aho_corasick::AhoCorasick;
 use bitvec::prelude::*;
 use seq_io::fastq::RefRecord;
 use std::ops::Range;
@@ -56,7 +57,7 @@ fn bases_colored(
             // this base is to be colored
             if !last_color_on {
                 // add up to but not including this base to the colored vector **as uncolored**
-                if last_bases_index + 1 < cur_bases_index {
+                if last_bases_index < cur_bases_index {
                     COLOR_BACKGROUND
                         .paint(&bases[last_bases_index..cur_bases_index])
                         .write_to(&mut colored_bases)
@@ -75,7 +76,7 @@ fn bases_colored(
             // this base is not to be colored
             if last_color_on {
                 // add up to but not including this base to the colored vector **as colored**
-                if last_bases_index + 1 < cur_bases_index {
+                if last_bases_index < cur_bases_index {
                     COLOR_BASES
                         .paint(&bases[last_bases_index..cur_bases_index])
                         .write_to(&mut colored_bases)
@@ -93,7 +94,7 @@ fn bases_colored(
         cur_bases_index += 1;
     }
     // Color to the end
-    if last_bases_index + 1 < cur_bases_index {
+    if last_bases_index < cur_bases_index {
         if last_color_on {
             COLOR_BASES
                 .paint(&bases[last_bases_index..cur_bases_index])
@@ -120,13 +121,14 @@ fn bases_colored(
 
 /// Validates that a given FIXED pattern contains only valid DNA bases (ACGTN)
 pub fn validate_fixed_pattern(pattern: &str) -> Result<()> {
-    for (index, base) in pattern.chars().enumerate() {
+    for (index, base) in pattern.char_indices() {
         if !DNA_BASES.contains(&(base as u8)) {
+            let end_index = index + base.len_utf8();
             bail!(
                 "Fixed pattern must contain only DNA bases: {} .. [{}] .. {}",
                 &pattern[0..index],
-                &pattern[index..=index],
-                &pattern[index + 1..],
+                &pattern[index..end_index],
+                &pattern[end_index..],
             )
         }
     }
@@ -227,16 +229,14 @@ impl FixedStringMatcher {
 /// Matcher for a set of fixed string patterns
 pub struct FixedStringSetMatcher {
     patterns: Vec<Vec<u8>>,
+    aho_corasick: AhoCorasick,
     opts: MatcherOpts,
 }
 
 impl Matcher for FixedStringSetMatcher {
     #[inline]
     fn bases_match(&self, bases: &[u8]) -> bool {
-        self.patterns
-            .iter()
-            .any(|pattern| bases.find(pattern).is_some())
-            != self.opts.invert_match
+        self.aho_corasick.is_match(bases) != self.opts.invert_match
     }
 
     fn color_matched_bases(&self, bases: &[u8], quals: &[u8]) -> (Vec<u8>, Vec<u8>) {
@@ -283,7 +283,13 @@ impl FixedStringSetMatcher {
             .into_iter()
             .map(|pattern| pattern.as_ref().to_owned().as_bytes().to_vec())
             .collect();
-        Self { patterns, opts }
+        let aho_corasick =
+            AhoCorasick::new(&patterns).expect("Failed to build Aho-Corasick automaton");
+        Self {
+            patterns,
+            aho_corasick,
+            opts,
+        }
     }
 }
 
@@ -294,12 +300,15 @@ pub struct RegexMatcher {
 }
 
 impl RegexMatcher {
-    pub fn new(pattern: &str, opts: MatcherOpts) -> Self {
+    pub fn new(pattern: &str, opts: MatcherOpts) -> anyhow::Result<Self> {
         let regex = RegexBuilder::new(pattern)
             .build()
-            .context(format!("Invalid regular expression: {}", pattern))
-            .unwrap();
-        Self { regex, opts }
+            .with_context(|| format!(
+                "Invalid regular expression: '{}'. \
+                Hint: Use --fixed-strings (-F) if you want to search for literal text containing regex special characters.",
+                pattern
+            ))?;
+        Ok(Self { regex, opts })
     }
 }
 
@@ -341,7 +350,7 @@ pub struct RegexSetMatcher {
 
 /// Matcher for a set of regular expression patterns
 impl RegexSetMatcher {
-    pub fn new<I, S>(patterns: I, opts: MatcherOpts) -> Self
+    pub fn new<I, S>(patterns: I, opts: MatcherOpts) -> anyhow::Result<Self>
     where
         S: AsRef<str>,
         I: IntoIterator<Item = S>,
@@ -353,16 +362,16 @@ impl RegexSetMatcher {
         let regex_set = RegexSetBuilder::new(string_patterns.clone())
             .dfa_size_limit(usize::MAX)
             .build()
-            .unwrap();
+            .context("Failed to build regex set from patterns")?;
         let regex_matchers: Vec<RegexMatcher> = string_patterns
             .into_iter()
             .map(|pattern| RegexMatcher::new(pattern.as_ref(), opts))
-            .collect();
-        Self {
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        Ok(Self {
             regex_set,
             regex_matchers,
             opts,
-        }
+        })
     }
 }
 
@@ -409,12 +418,12 @@ impl MatcherFactory {
         fixed_strings: bool,
         regexp: &Vec<String>,
         match_opts: MatcherOpts,
-    ) -> Box<dyn Matcher + Sync + Send> {
+    ) -> anyhow::Result<Box<dyn Matcher + Sync + Send>> {
         match (fixed_strings, &pattern) {
-            (true, Some(pattern)) => Box::new(FixedStringMatcher::new(pattern, match_opts)),
-            (false, Some(pattern)) => Box::new(RegexMatcher::new(pattern, match_opts)),
-            (true, None) => Box::new(FixedStringSetMatcher::new(regexp, match_opts)),
-            (false, None) => Box::new(RegexSetMatcher::new(regexp, match_opts)),
+            (true, Some(pattern)) => Ok(Box::new(FixedStringMatcher::new(pattern, match_opts))),
+            (false, Some(pattern)) => Ok(Box::new(RegexMatcher::new(pattern, match_opts)?)),
+            (true, None) => Ok(Box::new(FixedStringSetMatcher::new(regexp, match_opts))),
+            (false, None) => Ok(Box::new(RegexSetMatcher::new(regexp, match_opts)?)),
         }
     }
 }
@@ -557,7 +566,7 @@ pub mod tests {
                 reverse_complement,
             };
 
-            let matcher = RegexMatcher::new(pattern, opts);
+            let matcher = RegexMatcher::new(pattern, opts).unwrap();
             let qual = (0..seq.len()).map(|_| "X").collect::<String>();
             let record = format!("@id\n{seq}\n+\n{qual}\n");
             let mut reader = seq_io::fastq::Reader::new(record.as_bytes());
@@ -599,7 +608,7 @@ pub mod tests {
                 reverse_complement,
             };
 
-            let matcher = RegexSetMatcher::new(patterns.iter(), opts);
+            let matcher = RegexSetMatcher::new(patterns.iter(), opts).unwrap();
             let qual = (0..seq.len()).map(|_| "X").collect::<String>();
             let record = format!("@id\n{seq}\n+\n{qual}\n");
             let mut reader = seq_io::fastq::Reader::new(record.as_bytes());
@@ -630,5 +639,237 @@ pub mod tests {
         let result = validate_fixed_pattern(pattern);
         let inner = result.unwrap_err().to_string();
         assert_eq!(inner, msg);
+    }
+
+    // ############################################################################################
+    // Tests for reverse complement position calculations
+    // ############################################################################################
+
+    #[test]
+    fn test_rc_position_simple() {
+        // Sequence: AAATTTCCC (9 bases, indices 0-8)
+        // RC:       GGGAAATTT
+        // Pattern: TTT (3 bases) - looking for this in forward
+        // RC of TTT is AAA
+        // In RC: AAA appears at position 3 (indices 3-5 in RC)
+        // Forward position should be: 9 - 3 - 3 = 3 (indices 3-5 in forward)
+
+        let seq = b"AAATTTCCC";
+        let pattern = b"TTT"; // This is what we're looking for in forward
+
+        // Verify the RC
+        let rc = reverse_complement(seq);
+        assert_eq!(&rc, b"GGGAAATTT");
+
+        // Find RC of pattern in RC (AAA in RC)
+        let pattern_rc = reverse_complement(pattern);
+        let rc_start = rc.find(&pattern_rc).unwrap();
+        assert_eq!(rc_start, 3);
+
+        // Calculate forward position using the formula
+        let forward_start = seq.len() - rc_start - pattern.len();
+        assert_eq!(forward_start, 3); // 9 - 3 - 3 = 3
+
+        // Verify the pattern actually exists at that position in forward
+        assert_eq!(&seq[forward_start..forward_start + pattern.len()], pattern);
+    }
+
+    #[test]
+    fn test_rc_position_at_start() {
+        // Sequence: AAACCCGGG (9 bases)
+        // RC:       CCCGGGΤΤΤ
+        // Pattern: AAA (we want to find this in forward at position 0)
+        // RC of AAA is TTT
+        // In RC: TTT at position 6 (end of RC)
+        // Forward: 9 - 6 - 3 = 0 (start of forward)
+
+        let seq = b"AAACCCGGG";
+        let pattern = b"AAA";
+        let rc = reverse_complement(seq);
+        assert_eq!(&rc, b"CCCGGGTTT");
+
+        // Find RC of pattern in RC
+        let pattern_rc = reverse_complement(pattern);
+        let rc_start = rc.find(&pattern_rc).unwrap();
+        assert_eq!(rc_start, 6);
+
+        let forward_start = seq.len() - rc_start - pattern.len();
+        assert_eq!(forward_start, 0);
+        assert_eq!(&seq[forward_start..forward_start + pattern.len()], pattern);
+    }
+
+    #[test]
+    fn test_rc_position_at_end() {
+        // Sequence: CCCGGGTTT (9 bases)
+        // RC:       AAACCCGGG
+        // Pattern: AAA
+        // In RC: AAA at position 0 (start of RC)
+        // Forward: 9 - 0 - 3 = 6 (end of forward)
+
+        let seq = b"CCCGGGTTT";
+        let pattern = b"AAA";
+        let rc = reverse_complement(seq);
+        assert_eq!(&rc, b"AAACCCGGG");
+
+        let rc_start = rc.find(pattern).unwrap();
+        assert_eq!(rc_start, 0);
+
+        let forward_start = seq.len() - rc_start - pattern.len();
+        assert_eq!(forward_start, 6);
+
+        // Check it matches in forward (TTT is RC of AAA)
+        let expected_forward = reverse_complement(pattern);
+        assert_eq!(
+            &seq[forward_start..forward_start + pattern.len()],
+            expected_forward.as_slice()
+        );
+    }
+
+    #[test]
+    fn test_rc_position_longer_pattern() {
+        // Sequence: ACGTACGTACGT (12 bases)
+        // Pattern: ACGT (4 bases)
+        // RC:       ACGTACGTACGT (palindrome!)
+        // Pattern appears at positions 0, 4, 8 in both forward and RC
+
+        let seq = b"ACGTACGTACGT";
+        let pattern = b"ACGT";
+        let rc = reverse_complement(seq);
+
+        // This sequence is a palindrome
+        assert_eq!(seq, rc.as_slice());
+
+        // Test one position
+        let rc_start = 4;
+        let forward_start = seq.len() - rc_start - pattern.len();
+        assert_eq!(forward_start, 4); // 12 - 4 - 4 = 4 (palindrome property)
+    }
+
+    #[test]
+    fn test_rc_position_single_base() {
+        // Edge case: single base pattern
+        let seq = b"ACGTACGT";
+        let pattern = b"T";
+        let rc = reverse_complement(seq);
+        // RC: ACGTACGT (A<->T, C<->G, so ACGT reversed = ACGT)
+
+        // Find first T in RC
+        let rc_start = rc.find(pattern).unwrap();
+        let forward_start = seq.len() - rc_start - pattern.len();
+
+        // Verify the base at forward position is the RC of the RC base
+        assert_eq!(seq[forward_start], b'A'); // T in RC corresponds to A in forward
+    }
+
+    // ############################################################################################
+    // Property-based tests
+    // ############################################################################################
+
+    use proptest::prelude::*;
+
+    /// Strategy for generating valid DNA sequences
+    fn dna_sequence() -> impl Strategy<Value = Vec<u8>> {
+        prop::collection::vec(prop::sample::select(b"ACGT".to_vec()), 1..100)
+    }
+
+    /// Strategy for generating DNA patterns
+    fn dna_pattern() -> impl Strategy<Value = Vec<u8>> {
+        prop::collection::vec(prop::sample::select(b"ACGT".to_vec()), 1..20)
+    }
+
+    proptest! {
+        // Reduce test cases from default 256 to 20 for faster tests
+        #![proptest_config(ProptestConfig::with_cases(20))]
+
+        /// Property: Reverse complement is involutive - rc(rc(seq)) == seq
+        #[test]
+        fn prop_reverse_complement_involutive(seq in dna_sequence()) {
+            let rc = reverse_complement(&seq);
+            let rc_rc = reverse_complement(&rc);
+            prop_assert_eq!(seq, rc_rc);
+        }
+
+        /// Property: A sequence always matches itself as a fixed string
+        #[test]
+        fn prop_sequence_matches_itself(seq in dna_sequence()) {
+            let opts = MatcherOpts {
+                invert_match: false,
+                reverse_complement: false,
+            };
+            let matcher = FixedStringMatcher::new(
+                std::str::from_utf8(&seq).unwrap(),
+                opts
+            );
+            prop_assert!(matcher.bases_match(&seq));
+        }
+
+        /// Property: Pattern matching is consistent between forward and RC
+        #[test]
+        fn prop_rc_matching_consistent(seq in dna_sequence(), pattern in dna_pattern()) {
+            let opts_forward = MatcherOpts {
+                invert_match: false,
+                reverse_complement: false,
+            };
+            let opts_rc = MatcherOpts {
+                invert_match: false,
+                reverse_complement: true,
+            };
+
+            let pattern_str = std::str::from_utf8(&pattern).unwrap();
+            let matcher_forward = FixedStringMatcher::new(pattern_str, opts_forward);
+            let matcher_rc = FixedStringMatcher::new(pattern_str, opts_rc);
+
+            let matches_forward = matcher_forward.bases_match(&seq);
+            let matches_with_rc = matcher_rc.bases_match(&seq);
+
+            // If pattern matches forward, it should also match with RC enabled
+            if matches_forward {
+                prop_assert!(matches_with_rc);
+            }
+        }
+
+        /// Property: Invert match negates the result
+        #[test]
+        fn prop_invert_match_negates(seq in dna_sequence(), pattern in dna_pattern()) {
+            let opts_normal = MatcherOpts {
+                invert_match: false,
+                reverse_complement: false,
+            };
+            let opts_inverted = MatcherOpts {
+                invert_match: true,
+                reverse_complement: false,
+            };
+
+            let pattern_str = std::str::from_utf8(&pattern).unwrap();
+            let matcher_normal = FixedStringMatcher::new(pattern_str, opts_normal);
+            let matcher_inverted = FixedStringMatcher::new(pattern_str, opts_inverted);
+
+            let matches_normal = matcher_normal.bases_match(&seq);
+            let matches_inverted = matcher_inverted.bases_match(&seq);
+
+            // Invert should always negate the result
+            prop_assert_ne!(matches_normal, matches_inverted);
+        }
+
+        /// Property: Fixed string matcher and regex matcher agree on literal patterns
+        #[test]
+        fn prop_fixed_and_regex_agree(seq in dna_sequence(), pattern in dna_pattern()) {
+            let opts = MatcherOpts {
+                invert_match: false,
+                reverse_complement: false,
+            };
+
+            let pattern_str = std::str::from_utf8(&pattern).unwrap();
+            let fixed_matcher = FixedStringMatcher::new(pattern_str, opts);
+
+            // Only test if the pattern is valid for regex (no special chars, but DNA is safe)
+            if let Ok(regex_matcher) = RegexMatcher::new(pattern_str, opts) {
+                let fixed_result = fixed_matcher.bases_match(&seq);
+                let regex_result = regex_matcher.bases_match(&seq);
+
+                // They should always agree on literal patterns
+                prop_assert_eq!(fixed_result, regex_result);
+            }
+        }
     }
 }

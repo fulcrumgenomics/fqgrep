@@ -57,22 +57,6 @@ See the following for usage:
 <!-- start usage -->
 ```console
 
-OVERVIEW
-
-The fqgrep utility searches any given input FASTQ files, selecting records whose bases match one or more patterns.  By default, a pattern matches the bases in a FASTQ record if the regular expression (RE) in the pattern matches the bases.  An empty expression matches every line.  Each FASTQ record that matches at least one of the patterns is written to the standard output.
-
-INPUT COMPRESSION
-
-By default, the input files are assumed to be uncompressed with the following exceptions: (1) If the input files are real files and end with .gz or .bgz, they are assumed to be GZIP compressed, or (2) if they end with .fastq or .fq, they are assumed to be uncompressed, or (3) if the -Z/--decompress option is specified then any unrecongized inputs (including standard input) are assumed to be GZIP compressed.
-
-THREADS
-
-The --threads option controls the number of threads used to search the reads. Independently, for single end reads or interleaved paired end reads, a single thread will be used to read each input FASTQ.  For paired end reads across pairs of FASTQs, two threads will be used to read the FASTQs for each end of a pair.  Finally, a single thread will be created for the writer.
-
-EXIT STATUS
-
-The fqgrep utility exits with one of the following values: 0 if one or more lines were selected, 1 if no lines were selected, and >1 if an error occurred.
-
 Usage: fqgrep [OPTIONS] [ARGS]...
 
 Arguments:
@@ -86,7 +70,7 @@ Options:
           [default: 10]
 
       --color <COLOR>
-          Mark up the matching text.  The possible values of when are “never”, “always” and “auto”
+          Mark up the matching text.  The possible values of when are "never", "always" and "auto"
           
           [default: never]
           [possible values: never, always, auto]
@@ -117,6 +101,9 @@ Options:
 
       --progress
           Write progress information
+
+  -q, --quiet
+          Quiet mode: suppress all output except errors (match results still written to output)
 
   -h, --help
           Print help (see a summary with '-h')
