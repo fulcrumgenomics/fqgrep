@@ -109,6 +109,9 @@ Options:
   -f, --file <FILE>
           Read one or more newline separated patterns from file.  Empty pattern lines match every input line.  Newlines are not considered part of a pattern.  If file is empty, nothing is matched
 
+  -N, --read-names-file <READ_NAMES_FILE>
+          Read one or more newline separated query names (read IDs) from file.  Records whose read ID (the portion of the header before the first whitespace) exactly matches any query name in the file will be selected.  This option is mutually exclusive with pattern matching options (-e, -f, -F, and positional pattern)
+
   -v
           Selected lines are those not matching any of the specified patterns
 
