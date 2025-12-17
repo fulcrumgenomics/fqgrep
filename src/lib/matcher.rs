@@ -122,7 +122,7 @@ fn bases_colored(
 /// Validates that a given FIXED pattern contains only valid DNA bases (ACGTN)
 pub fn validate_fixed_pattern(pattern: &str) -> Result<()> {
     for (index, base) in pattern.char_indices() {
-        if !DNA_BASES.contains(&(base as u8)) {
+        if !base.is_ascii() || !DNA_BASES.contains(&(base as u8)) {
             let next_index = index + base.len_utf8();
             bail!(
                 "Fixed pattern must contain only DNA bases: {} .. [{}] .. {}",
@@ -416,14 +416,12 @@ impl QueryNameMatcher {
 }
 
 impl Matcher for QueryNameMatcher {
-    /// This method is not used for query name matching since we override read_match().
-    /// Always returns the inverse of invert_match to maintain consistent behavior.
+    /// Not used — matching is by query name, not sequence. See `read_match()`.
     #[inline]
     fn bases_match(&self, _bases: &[u8]) -> bool {
         !self.opts.invert_match
     }
 
-    /// No coloring for query name matches - return uncolored bases and quals.
     fn color_matched_bases(&self, bases: &[u8], quals: &[u8]) -> (Vec<u8>, Vec<u8>) {
         (bases.to_vec(), quals.to_vec())
     }
@@ -433,7 +431,6 @@ impl Matcher for QueryNameMatcher {
         self.opts
     }
 
-    /// Override read_match to match against query name instead of sequence.
     #[inline]
     fn read_match(&self, read: &RefRecord) -> bool {
         let id_match = self.query_names.contains(read.id_bytes());
@@ -734,5 +731,20 @@ pub mod tests {
         let result = validate_fixed_pattern(pattern);
         let inner = result.unwrap_err().to_string();
         assert_eq!(inner, msg);
+    }
+
+    #[test]
+    fn test_validate_fixed_pattern_rejects_non_ascii() {
+        // A non-ASCII character whose low byte happens to match 'A' (0x41)
+        // U+0141 (Latin capital letter L with stroke) has value 321, low byte = 0x41 = 'A'
+        let pattern = "AC\u{0141}T";
+        let result = validate_fixed_pattern(pattern);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Fixed pattern must contain only DNA bases")
+        );
     }
 }
