@@ -79,7 +79,7 @@ where
 }
 
 /// Thin wrapper around a ``RecordSet`` that contains an even number of records, with interleaved
-/// read spairs.
+/// read pairs.
 #[derive(Default, Clone, Debug, Serialize, Deserialize)]
 pub struct InterleavedRecordSet {
     set: RecordSet,
