@@ -120,13 +120,14 @@ fn bases_colored(
 
 /// Validates that a given FIXED pattern contains only valid DNA bases (ACGTN)
 pub fn validate_fixed_pattern(pattern: &str) -> Result<()> {
-    for (index, base) in pattern.chars().enumerate() {
+    for (index, base) in pattern.char_indices() {
         if !DNA_BASES.contains(&(base as u8)) {
+            let next_index = index + base.len_utf8();
             bail!(
                 "Fixed pattern must contain only DNA bases: {} .. [{}] .. {}",
                 &pattern[0..index],
-                &pattern[index..=index],
-                &pattern[index + 1..],
+                &pattern[index..next_index],
+                &pattern[next_index..],
             )
         }
     }
