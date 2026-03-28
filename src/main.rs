@@ -767,7 +767,7 @@ pub mod tests {
         seqs: &Vec<Vec<&str>>,
         regexp: &Vec<String>,
         pattern_from_file: bool,
-        output: Option<PathBuf>,
+        output: Vec<PathBuf>,
         compression: String,
     ) -> Opts {
         let fq_path = write_fastq(dir, seqs, compression);
@@ -783,7 +783,7 @@ pub mod tests {
         Opts {
             threads: 4,
             color: Color::Never,
-            count: output.is_none(),
+            count: output.is_empty(),
             regexp: pattern_string,
             fixed_strings: false,
             file: pattern_file,
@@ -794,8 +794,8 @@ pub mod tests {
             reverse_complement: false,
             progress: true,
             protein: false,
-            args: fq_path.clone(),
-            output: output.into_iter().collect(),
+            args: fq_path,
+            output,
         }
     }
 
@@ -861,7 +861,7 @@ pub mod tests {
             vec!["GGTT", "GGCC"],
         ];
         let pattern = pattern.iter().map(|&s| s.to_owned()).collect::<Vec<_>>();
-        let mut opts = build_opts(&dir, &seqs, &pattern, true, None, String::from(".fq"));
+        let mut opts = build_opts(&dir, &seqs, &pattern, true, vec![], String::from(".fq"));
         opts.paired = paired;
         let result = fqgrep_from_opts(&opts);
         assert_eq!(result.unwrap(), expected);
@@ -906,7 +906,7 @@ pub mod tests {
             &seqs,
             &pattern,
             true,
-            Some(out_path),
+            vec![out_path],
             String::from(".fq"),
         );
 
@@ -944,7 +944,7 @@ pub mod tests {
             &seqs,
             &pattern,
             true,
-            Some(out_path),
+            vec![out_path],
             String::from(".fq"),
         );
 
@@ -981,7 +981,7 @@ pub mod tests {
         let dir = TempDir::new().unwrap();
         let seqs = vec![vec!["GGGG", "GGGG"], vec!["AAAA", "CCCC"]];
         let pattern = vec![String::from("TTTT")];
-        let mut opts = build_opts(&dir, &seqs, &pattern, false, None, String::from(".fq"));
+        let mut opts = build_opts(&dir, &seqs, &pattern, false, vec![], String::from(".fq"));
 
         opts.paired = paired;
         opts.invert_match = invert_match;
@@ -1031,7 +1031,7 @@ pub mod tests {
         let dir = TempDir::new().unwrap();
         let seqs = vec![vec!["GGGG", "TTTT"], vec!["AAAA", "CCCC"]];
 
-        let mut opts = build_opts(&dir, &seqs, &pattern, true, None, String::from(".fq"));
+        let mut opts = build_opts(&dir, &seqs, &pattern, true, vec![], String::from(".fq"));
 
         opts.fixed_strings = fixed_strings;
         opts.protein = protein;
@@ -1055,7 +1055,7 @@ pub mod tests {
         ];
 
         let test_pattern = vec![String::from("A")];
-        let mut opts_test = build_opts(&dir, &seqs, &test_pattern, true, None, String::from(".fq"));
+        let mut opts_test = build_opts(&dir, &seqs, &test_pattern, true, vec![], String::from(".fq"));
 
         opts_test.paired = true;
         let _num_matches = fqgrep_from_opts(&opts_test);
@@ -1076,7 +1076,7 @@ pub mod tests {
         ];
 
         let test_pattern = vec![String::from("^G")];
-        let mut opts_test = build_opts(&dir, &seqs, &test_pattern, true, None, String::from(".fq"));
+        let mut opts_test = build_opts(&dir, &seqs, &test_pattern, true, vec![], String::from(".fq"));
 
         // Test pattern from file
         let result = fqgrep_from_opts(&opts_test);
@@ -1107,7 +1107,7 @@ pub mod tests {
 
         let test_pattern = vec![String::from("^G")];
 
-        let opts = build_opts(&dir, &seqs, &test_pattern, true, None, extension);
+        let opts = build_opts(&dir, &seqs, &test_pattern, true, vec![], extension);
         let result = fqgrep_from_opts(&opts);
         assert_eq!(result.unwrap(), expected);
     }
@@ -1128,7 +1128,7 @@ pub mod tests {
     ) {
         let dir = TempDir::new().unwrap();
         let seqs = vec![vec!["GTCAGC"], vec!["AGTGCG"], vec!["GGGTCTG"]];
-        let mut opts = build_opts(&dir, &seqs, &pattern, true, None, String::from(".fq"));
+        let mut opts = build_opts(&dir, &seqs, &pattern, true, vec![], String::from(".fq"));
         opts.fixed_strings = fixed_strings;
         assert_eq!(fqgrep(&opts), expected);
     }
@@ -1154,7 +1154,7 @@ pub mod tests {
         let query_names: Vec<String> = query_names.iter().map(|s| s.to_string()).collect();
         let query_names_path = write_pattern(&dir, &query_names);
 
-        let mut opts = build_opts(&dir, &seqs, &vec![], false, None, String::from(".fq"));
+        let mut opts = build_opts(&dir, &seqs, &vec![], false, vec![], String::from(".fq"));
         opts.read_names_file = Some(query_names_path);
         opts.invert_match = invert_match;
         opts.regexp = vec![];
@@ -1178,7 +1178,7 @@ pub mod tests {
         let query_names: Vec<String> = query_names.iter().map(|s| s.to_string()).collect();
         let query_names_path = write_pattern(&dir, &query_names);
 
-        let mut opts = build_opts(&dir, &seqs, &vec![], false, None, String::from(".fq"));
+        let mut opts = build_opts(&dir, &seqs, &vec![], false, vec![], String::from(".fq"));
         opts.read_names_file = Some(query_names_path);
         opts.invert_match = invert_match;
         opts.paired = true;
@@ -1194,7 +1194,7 @@ pub mod tests {
         let seqs = vec![vec!["AAAA", "TTTT"]];
         let query_names_path = write_pattern(&dir, &vec![]);
 
-        let mut opts = build_opts(&dir, &seqs, &vec![], false, None, String::from(".fq"));
+        let mut opts = build_opts(&dir, &seqs, &vec![], false, vec![], String::from(".fq"));
         opts.read_names_file = Some(query_names_path);
         opts.regexp = vec![];
 
@@ -1208,7 +1208,7 @@ pub mod tests {
         let seqs = vec![vec!["AAAA", "TTTT"]];
         let query_names_path = write_pattern(&dir, &vec![]);
 
-        let mut opts = build_opts(&dir, &seqs, &vec![], false, None, String::from(".fq"));
+        let mut opts = build_opts(&dir, &seqs, &vec![], false, vec![], String::from(".fq"));
         opts.read_names_file = Some(query_names_path);
         opts.invert_match = true;
         opts.regexp = vec![];
