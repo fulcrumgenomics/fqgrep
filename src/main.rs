@@ -228,10 +228,11 @@ struct Opts {
     ///
     args: Vec<String>,
 
-    /// Hidden option to capture stdout for testing
-    ///
+    /// The output file(s) to write matching records to.  When `--paired` is given with two output
+    /// files, the first output file will contain R1 records and the second will contain R2 records.
+    /// With zero or one output files, paired records are interleaved.
     #[clap(long, hide_short_help = true, hide_long_help = true)]
-    output: Option<PathBuf>,
+    output: Vec<PathBuf>,
 }
 
 fn read_patterns(file: &PathBuf) -> Result<Vec<String>> {
@@ -427,6 +428,20 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
         );
     }
 
+    // Validate the number of output files
+    let paired_output = opts.output.len() == 2;
+    ensure!(
+        opts.output.len() <= 2,
+        "Expected at most 2 output files, got {}",
+        opts.output.len()
+    );
+    if paired_output {
+        ensure!(
+            opts.paired,
+            "Two output files may only be given with --paired"
+        );
+    }
+
     // Validate the fixed string pattern, if fixed-strings are specified
     // Skip validation when using bitmask mode (patterns contain IUPAC codes by design)
     if query_names.is_none() && opts.fixed_strings && bitencs.is_none() {
@@ -465,19 +480,41 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
     let color = query_names.is_none()
         && (opts.color == Color::Always || (opts.color == Color::Auto && stdout_isatty()));
 
-    let mut maybe_writer: Option<Box<dyn Write>> = {
+    // Create R1 writer (also used for interleaved/single-end output) and optional R2 writer
+    type OptWriter = Option<Box<dyn Write>>;
+    let (mut r1_writer, mut r2_writer): (OptWriter, OptWriter) = {
         if opts.count {
-            None
-        } else if let Some(file_path) = opts.output {
-            Some(Box::new(BufWriter::with_capacity(
+            (None, None)
+        } else if paired_output {
+            let w1 = Box::new(BufWriter::with_capacity(
                 BUFSIZE,
-                File::create(file_path).unwrap(),
-            )))
+                File::create(&opts.output[0]).with_context(|| {
+                    format!("Error creating output: {}", opts.output[0].display())
+                })?,
+            ));
+            let w2 = Box::new(BufWriter::with_capacity(
+                BUFSIZE,
+                File::create(&opts.output[1]).with_context(|| {
+                    format!("Error creating output: {}", opts.output[1].display())
+                })?,
+            ));
+            (Some(w1), Some(w2))
+        } else if opts.output.len() == 1 {
+            let w = Box::new(BufWriter::with_capacity(
+                BUFSIZE,
+                File::create(&opts.output[0]).with_context(|| {
+                    format!("Error creating output: {}", opts.output[0].display())
+                })?,
+            ));
+            (Some(w), None)
         } else {
-            Some(Box::new(BufWriter::with_capacity(
-                BUFSIZE,
-                std::io::stdout(),
-            )))
+            (
+                Some(Box::new(BufWriter::with_capacity(
+                    BUFSIZE,
+                    std::io::stdout(),
+                ))),
+                None,
+            )
         }
     };
     let mut num_matches = 0usize;
@@ -519,45 +556,15 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
                 |(read1, read2), found| {
                     if *found > 0 {
                         num_matches += 1;
-                        if let Some(writer) = &mut maybe_writer {
-                            if color {
-                                let found1 = *found == 1;
-                                let found2 = *found == 2 || matcher.read_match(&read2);
-                                let mut read1 = read1.to_owned_record();
-                                let mut read2 = read2.to_owned_record();
-                                matcher.color(&mut read1, found1);
-                                matcher.color(&mut read2, found2);
-                                fastq::write_to(
-                                    &mut *writer,
-                                    read1.head(),
-                                    read1.seq(),
-                                    read1.qual(),
-                                )
-                                .unwrap();
-                                fastq::write_to(
-                                    &mut *writer,
-                                    read2.head(),
-                                    read2.seq(),
-                                    read2.qual(),
-                                )
-                                .unwrap();
-                            } else {
-                                fastq::write_to(
-                                    &mut *writer,
-                                    read1.head(),
-                                    read1.seq(),
-                                    read1.qual(),
-                                )
-                                .unwrap();
-                                fastq::write_to(
-                                    &mut *writer,
-                                    read2.head(),
-                                    read2.seq(),
-                                    read2.qual(),
-                                )
-                                .unwrap();
-                            }
-                        }
+                        write_paired_record(
+                            &read1,
+                            &read2,
+                            *found,
+                            color,
+                            &matcher,
+                            &mut r1_writer,
+                            &mut r2_writer,
+                        );
                     }
                     None::<()>
                 },
@@ -581,45 +588,15 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
                     |(read1, read2), found| {
                         if *found > 0 {
                             num_matches += 1;
-                            if let Some(writer) = &mut maybe_writer {
-                                if color {
-                                    let found1 = *found == 1;
-                                    let found2 = *found == 2 || matcher.read_match(&read2);
-                                    let mut read1 = read1.to_owned_record();
-                                    let mut read2 = read2.to_owned_record();
-                                    matcher.color(&mut read1, found1);
-                                    matcher.color(&mut read2, found2);
-                                    fastq::write_to(
-                                        &mut *writer,
-                                        read1.head(),
-                                        read1.seq(),
-                                        read1.qual(),
-                                    )
-                                    .unwrap();
-                                    fastq::write_to(
-                                        &mut *writer,
-                                        read2.head(),
-                                        read2.seq(),
-                                        read2.qual(),
-                                    )
-                                    .unwrap();
-                                } else {
-                                    fastq::write_to(
-                                        &mut *writer,
-                                        read1.head(),
-                                        read1.seq(),
-                                        read1.qual(),
-                                    )
-                                    .unwrap();
-                                    fastq::write_to(
-                                        &mut *writer,
-                                        read2.head(),
-                                        read2.seq(),
-                                        read2.qual(),
-                                    )
-                                    .unwrap();
-                                }
-                            }
+                            write_paired_record(
+                                &read1,
+                                &read2,
+                                *found,
+                                color,
+                                &matcher,
+                                &mut r1_writer,
+                                &mut r2_writer,
+                            );
                         }
                         None::<()>
                     },
@@ -645,7 +622,7 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
                 |record, found| {
                     if *found {
                         num_matches += 1;
-                        if let Some(writer) = &mut maybe_writer {
+                        if let Some(writer) = &mut r1_writer {
                             if color {
                                 let mut record = record.to_owned_record();
                                 matcher.color(&mut record, *found);
@@ -672,6 +649,58 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
 
     // Get the final count of records matched
     Ok(num_matches)
+}
+
+/// Writes a matched paired-end record to the appropriate writer(s).
+///
+/// When `r2_writer` is `Some`, R1 records are written to `r1_writer` and R2 records are written
+/// to `r2_writer`.  Otherwise, both R1 and R2 records are interleaved into `r1_writer`.
+#[allow(clippy::borrowed_box)]
+fn write_paired_record(
+    read1: &RefRecord,
+    read2: &RefRecord,
+    found: u32,
+    color: bool,
+    matcher: &Box<dyn Matcher + Sync + Send>,
+    r1_writer: &mut Option<Box<dyn Write>>,
+    r2_writer: &mut Option<Box<dyn Write>>,
+) {
+    // Determine the writer for R2: use r2_writer if separate outputs, otherwise use r1_writer
+    let (w1, w2) = if r2_writer.is_some() {
+        // Split outputs: R1 to r1_writer, R2 to r2_writer
+        // Need to use raw pointers to borrow both mutably since they're different Options
+        let w1 = r1_writer.as_mut();
+        let w2 = r2_writer.as_mut();
+        (w1, w2)
+    } else {
+        // Interleaved: both to r1_writer
+        (r1_writer.as_mut(), None)
+    };
+
+    if let Some(w1) = w1 {
+        // Get the actual R2 writer: either the separate r2_writer or fall back to the same as R1
+        if color {
+            let found1 = found == 1;
+            let found2 = found == 2 || matcher.read_match(read2);
+            let mut read1 = read1.to_owned_record();
+            let mut read2 = read2.to_owned_record();
+            matcher.color(&mut read1, found1);
+            matcher.color(&mut read2, found2);
+            fastq::write_to(&mut *w1, read1.head(), read1.seq(), read1.qual()).unwrap();
+            if let Some(w2) = w2 {
+                fastq::write_to(&mut *w2, read2.head(), read2.seq(), read2.qual()).unwrap();
+            } else {
+                fastq::write_to(&mut *w1, read2.head(), read2.seq(), read2.qual()).unwrap();
+            }
+        } else {
+            fastq::write_to(&mut *w1, read1.head(), read1.seq(), read1.qual()).unwrap();
+            if let Some(w2) = w2 {
+                fastq::write_to(&mut *w2, read2.head(), read2.seq(), read2.qual()).unwrap();
+            } else {
+                fastq::write_to(&mut *w1, read2.head(), read2.seq(), read2.qual()).unwrap();
+            }
+        }
+    }
 }
 
 #[allow(clippy::ref_option)] // FIXME: remove me later and solve
@@ -813,7 +842,7 @@ pub mod tests {
         seqs: &Vec<Vec<&str>>,
         regexp: &Vec<String>,
         pattern_from_file: bool,
-        output: Option<PathBuf>,
+        output: Vec<PathBuf>,
         compression: String,
     ) -> Opts {
         let fq_path = write_fastq(dir, seqs, compression);
@@ -829,7 +858,7 @@ pub mod tests {
         Opts {
             threads: 4,
             color: Color::Never,
-            count: output.is_none(),
+            count: output.is_empty(),
             regexp: pattern_string,
             fixed_strings: false,
             file: pattern_file,
@@ -908,7 +937,7 @@ pub mod tests {
             vec!["GGTT", "GGCC"],
         ];
         let pattern = pattern.iter().map(|&s| s.to_owned()).collect::<Vec<_>>();
-        let mut opts = build_opts(&dir, &seqs, &pattern, true, None, String::from(".fq"));
+        let mut opts = build_opts(&dir, &seqs, &pattern, true, Vec::new(), String::from(".fq"));
         opts.paired = paired;
         let result = fqgrep_from_opts(&opts);
         assert_eq!(result.unwrap(), expected);
@@ -953,7 +982,7 @@ pub mod tests {
             &seqs,
             &pattern,
             true,
-            Some(out_path),
+            vec![out_path],
             String::from(".fq"),
         );
 
@@ -991,7 +1020,7 @@ pub mod tests {
             &seqs,
             &pattern,
             true,
-            Some(out_path),
+            vec![out_path],
             String::from(".fq"),
         );
 
@@ -1028,7 +1057,14 @@ pub mod tests {
         let dir = TempDir::new().unwrap();
         let seqs = vec![vec!["GGGG", "GGGG"], vec!["AAAA", "CCCC"]];
         let pattern = vec![String::from("TTTT")];
-        let mut opts = build_opts(&dir, &seqs, &pattern, false, None, String::from(".fq"));
+        let mut opts = build_opts(
+            &dir,
+            &seqs,
+            &pattern,
+            false,
+            Vec::new(),
+            String::from(".fq"),
+        );
 
         opts.paired = paired;
         opts.invert_match = invert_match;
@@ -1036,6 +1072,69 @@ pub mod tests {
 
         let result = fqgrep_from_opts(&opts);
         assert_eq!(result.unwrap(), expected);
+    }
+
+    // ############################################################################################
+    // Tests that paired output writes R1 and R2 to separate files
+    // ############################################################################################
+
+    fn slurp_fastq(path: &PathBuf) -> Vec<OwnedRecord> {
+        let handle = File::open(path).unwrap();
+        let buf_handle = BufReader::with_capacity(BUFSIZE, handle);
+        let maybe_decoder_handle: Box<dyn Read> = if is_gzip_path(path) {
+            Box::new(MultiGzDecoder::new(buf_handle))
+        } else {
+            Box::new(buf_handle)
+        };
+        fastq::Reader::with_capacity(maybe_decoder_handle, BUFSIZE)
+            .into_records()
+            .map(|r| r.expect("Error reading"))
+            .collect::<Vec<_>>()
+    }
+
+    #[rstest]
+    fn test_paired_outputs() {
+        let dir: TempDir = TempDir::new().unwrap();
+        let seqs = vec![
+            //   both    r2      r1      neither
+            vec!["GGGG", "AAAA", "AGGG", "TGCA"],
+            vec!["GGGG", "GGGA", "CCCC", "ACGT"],
+        ];
+        let pattern = vec![String::from("GGG")];
+        let mut opts = build_opts(
+            &dir,
+            &seqs,
+            &pattern,
+            false,
+            Vec::new(),
+            String::from(".fq"),
+        );
+
+        let r1_output = dir.path().join("out.r1.fq");
+        let r2_output = dir.path().join("out.r2.fq");
+
+        opts.paired = true;
+        opts.invert_match = false;
+        opts.reverse_complement = false;
+        opts.output = vec![r1_output, r2_output];
+        opts.count = false;
+
+        let result = fqgrep_from_opts(&opts);
+        assert_eq!(result.unwrap(), 3);
+
+        // Check the output FASTQs
+        let r1_records = slurp_fastq(&opts.output[0]);
+        let r2_records = slurp_fastq(&opts.output[1]);
+        assert_eq!(r1_records.len(), 3);
+        assert_eq!(r2_records.len(), 3);
+        for (i, rec) in r1_records.iter().enumerate() {
+            let seq: String = String::from_utf8_lossy(rec.seq()).to_string();
+            assert_eq!(seq, seqs[0][i]);
+        }
+        for (i, rec) in r2_records.iter().enumerate() {
+            let seq: String = String::from_utf8_lossy(rec.seq()).to_string();
+            assert_eq!(seq, seqs[1][i]);
+        }
     }
 
     // ############################################################################################
@@ -1078,7 +1177,7 @@ pub mod tests {
         let dir = TempDir::new().unwrap();
         let seqs = vec![vec!["GGGG", "TTTT"], vec!["AAAA", "CCCC"]];
 
-        let mut opts = build_opts(&dir, &seqs, &pattern, true, None, String::from(".fq"));
+        let mut opts = build_opts(&dir, &seqs, &pattern, true, Vec::new(), String::from(".fq"));
 
         opts.fixed_strings = fixed_strings;
         opts.protein = protein;
@@ -1102,7 +1201,14 @@ pub mod tests {
         ];
 
         let test_pattern = vec![String::from("A")];
-        let mut opts_test = build_opts(&dir, &seqs, &test_pattern, true, None, String::from(".fq"));
+        let mut opts_test = build_opts(
+            &dir,
+            &seqs,
+            &test_pattern,
+            true,
+            Vec::new(),
+            String::from(".fq"),
+        );
 
         opts_test.paired = true;
         let _num_matches = fqgrep_from_opts(&opts_test);
@@ -1123,7 +1229,14 @@ pub mod tests {
         ];
 
         let test_pattern = vec![String::from("^G")];
-        let mut opts_test = build_opts(&dir, &seqs, &test_pattern, true, None, String::from(".fq"));
+        let mut opts_test = build_opts(
+            &dir,
+            &seqs,
+            &test_pattern,
+            true,
+            Vec::new(),
+            String::from(".fq"),
+        );
 
         // Test pattern from file
         let result = fqgrep_from_opts(&opts_test);
@@ -1154,7 +1267,7 @@ pub mod tests {
 
         let test_pattern = vec![String::from("^G")];
 
-        let opts = build_opts(&dir, &seqs, &test_pattern, true, None, extension);
+        let opts = build_opts(&dir, &seqs, &test_pattern, true, Vec::new(), extension);
         let result = fqgrep_from_opts(&opts);
         assert_eq!(result.unwrap(), expected);
     }
@@ -1175,7 +1288,7 @@ pub mod tests {
     ) {
         let dir = TempDir::new().unwrap();
         let seqs = vec![vec!["GTCAGC"], vec!["AGTGCG"], vec!["GGGTCTG"]];
-        let mut opts = build_opts(&dir, &seqs, &pattern, true, None, String::from(".fq"));
+        let mut opts = build_opts(&dir, &seqs, &pattern, true, Vec::new(), String::from(".fq"));
         opts.fixed_strings = fixed_strings;
         assert_eq!(fqgrep(&opts), expected);
     }
@@ -1201,7 +1314,7 @@ pub mod tests {
         let query_names: Vec<String> = query_names.iter().map(|s| s.to_string()).collect();
         let query_names_path = write_pattern(&dir, &query_names);
 
-        let mut opts = build_opts(&dir, &seqs, &vec![], false, None, String::from(".fq"));
+        let mut opts = build_opts(&dir, &seqs, &vec![], false, Vec::new(), String::from(".fq"));
         opts.read_names_file = Some(query_names_path);
         opts.invert_match = invert_match;
         opts.regexp = vec![];
@@ -1225,7 +1338,7 @@ pub mod tests {
         let query_names: Vec<String> = query_names.iter().map(|s| s.to_string()).collect();
         let query_names_path = write_pattern(&dir, &query_names);
 
-        let mut opts = build_opts(&dir, &seqs, &vec![], false, None, String::from(".fq"));
+        let mut opts = build_opts(&dir, &seqs, &vec![], false, Vec::new(), String::from(".fq"));
         opts.read_names_file = Some(query_names_path);
         opts.invert_match = invert_match;
         opts.paired = true;
@@ -1241,7 +1354,7 @@ pub mod tests {
         let seqs = vec![vec!["AAAA", "TTTT"]];
         let query_names_path = write_pattern(&dir, &vec![]);
 
-        let mut opts = build_opts(&dir, &seqs, &vec![], false, None, String::from(".fq"));
+        let mut opts = build_opts(&dir, &seqs, &vec![], false, Vec::new(), String::from(".fq"));
         opts.read_names_file = Some(query_names_path);
         opts.regexp = vec![];
 
@@ -1255,7 +1368,7 @@ pub mod tests {
         let seqs = vec![vec!["AAAA", "TTTT"]];
         let query_names_path = write_pattern(&dir, &vec![]);
 
-        let mut opts = build_opts(&dir, &seqs, &vec![], false, None, String::from(".fq"));
+        let mut opts = build_opts(&dir, &seqs, &vec![], false, Vec::new(), String::from(".fq"));
         opts.read_names_file = Some(query_names_path);
         opts.invert_match = true;
         opts.regexp = vec![];
@@ -1276,7 +1389,14 @@ pub mod tests {
         let dir = TempDir::new().unwrap();
         let seqs = vec![vec!["GATG", "GATT", "GATA", "GATC"]];
         let pattern = vec![String::from("GATK")];
-        let mut opts = build_opts(&dir, &seqs, &pattern, false, None, String::from(".fq"));
+        let mut opts = build_opts(
+            &dir,
+            &seqs,
+            &pattern,
+            false,
+            Vec::new(),
+            String::from(".fq"),
+        );
         opts.fixed_strings = true;
         opts.iupac = iupac_mode;
         let result = fqgrep_from_opts(&opts);
@@ -1291,7 +1411,14 @@ pub mod tests {
         let dir = TempDir::new().unwrap();
         let seqs = vec![vec!["GATG", "ACCA", "TTTT", "CCCC"]];
         let pattern = vec![String::from("GATK"), String::from("ACS")];
-        let mut opts = build_opts(&dir, &seqs, &pattern, false, None, String::from(".fq"));
+        let mut opts = build_opts(
+            &dir,
+            &seqs,
+            &pattern,
+            false,
+            Vec::new(),
+            String::from(".fq"),
+        );
         opts.fixed_strings = true;
         opts.iupac = iupac_mode;
         let result = fqgrep_from_opts(&opts);
@@ -1306,7 +1433,14 @@ pub mod tests {
         let dir = TempDir::new().unwrap();
         let seqs = vec![vec!["GATG", "GATT", "GATA", "GATC"]];
         let pattern = vec![String::from("GATK")];
-        let mut opts = build_opts(&dir, &seqs, &pattern, false, None, String::from(".fq"));
+        let mut opts = build_opts(
+            &dir,
+            &seqs,
+            &pattern,
+            false,
+            Vec::new(),
+            String::from(".fq"),
+        );
         opts.fixed_strings = true;
         opts.iupac = iupac_mode;
         opts.invert_match = true;
@@ -1326,7 +1460,14 @@ pub mod tests {
         let dir = TempDir::new().unwrap();
         let seqs = vec![vec!["AAAT", "ACGT", "TTTT"]];
         let pattern = vec![String::from("AN")];
-        let mut opts = build_opts(&dir, &seqs, &pattern, false, None, String::from(".fq"));
+        let mut opts = build_opts(
+            &dir,
+            &seqs,
+            &pattern,
+            false,
+            Vec::new(),
+            String::from(".fq"),
+        );
         opts.fixed_strings = true;
         opts.iupac = iupac_mode;
         let result = fqgrep_from_opts(&opts);
@@ -1339,7 +1480,14 @@ pub mod tests {
         let seqs = vec![vec!["ACGT"]];
         // 8 Ns = 4^8 = 65536 expansions, which exceeds MAX_IUPAC_EXPANSIONS
         let pattern = vec![String::from("NNNNNNNN")];
-        let mut opts = build_opts(&dir, &seqs, &pattern, false, None, String::from(".fq"));
+        let mut opts = build_opts(
+            &dir,
+            &seqs,
+            &pattern,
+            false,
+            Vec::new(),
+            String::from(".fq"),
+        );
         opts.fixed_strings = true;
         opts.iupac = IupacOption::Expand;
         let result = fqgrep_from_opts(&opts);
