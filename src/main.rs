@@ -182,8 +182,9 @@ struct Opts {
 
     /// Treat the input files as paired.  The number of input files must be a multiple of two,
     /// with the first file being R1, second R2, third R1, fourth R2, and so on.  If the pattern
-    /// matches either R1 or R2, then both R1 and R2 will be output (interleaved).  If the input
-    /// is standard input, then treat the input as interlaved paired end reads.
+    /// matches either R1 or R2, then both R1 and R2 will be output.  If the input is standard
+    /// input, then treat the input as interleaved paired end reads.  By default, R1 and R2 are
+    /// interleaved in the output; use `-o` twice to write R1 and R2 to separate files.
     #[clap(long)]
     paired: bool,
 
@@ -1215,5 +1216,120 @@ pub mod tests {
 
         let result = fqgrep_from_opts(&opts);
         assert_eq!(result.unwrap(), 2);
+    }
+
+    /// Reads all records from a FASTQ file and returns them as `OwnedRecord`s.
+    fn slurp_fastq(path: &PathBuf) -> Vec<OwnedRecord> {
+        let mut records = vec![];
+        let mut reader = fastq::Reader::from_path(path).unwrap();
+        while let Some(record) = reader.next() {
+            let record = record.expect("Error reading record");
+            records.push(record.to_owned_record());
+        }
+        records
+    }
+
+    // ############################################################################################
+    // Tests that paired output writes R1 and R2 to separate files
+    // ############################################################################################
+    #[test]
+    fn test_paired_outputs() {
+        let dir = TempDir::new().unwrap();
+        // 4 pairs:  both-match, r2-only, r1-only, neither
+        let seqs = vec![
+            vec!["GGGG", "AAAA", "AGGG", "TGCA"],
+            vec!["GGGG", "GGGA", "CCCC", "ACGT"],
+        ];
+        let pattern = vec![String::from("GGG")];
+        let r1_output = dir.path().join("out.r1.fq");
+        let r2_output = dir.path().join("out.r2.fq");
+
+        let mut opts = build_opts(
+            &dir,
+            &seqs,
+            &pattern,
+            false,
+            vec![r1_output.clone(), r2_output.clone()],
+            String::from(".fq"),
+        );
+        opts.paired = true;
+        opts.count = false;
+
+        let result = fqgrep_from_opts(&opts);
+        assert_eq!(result.unwrap(), 3); // 3 pairs matched
+
+        // Verify R1 output
+        let r1_records = slurp_fastq(&r1_output);
+        let r1_seqs: Vec<String> = r1_records
+            .iter()
+            .map(|r| String::from_utf8_lossy(r.seq()).to_string())
+            .collect();
+        assert_eq!(r1_seqs, vec!["GGGG", "AAAA", "AGGG"]);
+
+        // Verify R2 output
+        let r2_records = slurp_fastq(&r2_output);
+        let r2_seqs: Vec<String> = r2_records
+            .iter()
+            .map(|r| String::from_utf8_lossy(r.seq()).to_string())
+            .collect();
+        assert_eq!(r2_seqs, vec!["GGGG", "GGGA", "CCCC"]);
+    }
+
+    // ############################################################################################
+    // Tests output validation errors
+    // ############################################################################################
+    #[test]
+    fn test_two_outputs_requires_paired() {
+        let dir = TempDir::new().unwrap();
+        let seqs = vec![vec!["GGGG"]];
+        let pattern = vec![String::from("GGG")];
+        let r1_output = dir.path().join("out.r1.fq");
+        let r2_output = dir.path().join("out.r2.fq");
+
+        let opts = build_opts(
+            &dir,
+            &seqs,
+            &pattern,
+            false,
+            vec![r1_output, r2_output],
+            String::from(".fq"),
+        );
+        // paired is false by default from build_opts
+        let result = fqgrep_from_opts(&opts);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Two output files may only be given with --paired")
+        );
+    }
+
+    #[test]
+    fn test_three_outputs_is_error() {
+        let dir = TempDir::new().unwrap();
+        let seqs = vec![vec!["GGGG"]];
+        let pattern = vec![String::from("GGG")];
+        let o1 = dir.path().join("o1.fq");
+        let o2 = dir.path().join("o2.fq");
+        let o3 = dir.path().join("o3.fq");
+
+        let mut opts = build_opts(
+            &dir,
+            &seqs,
+            &pattern,
+            false,
+            vec![o1, o2, o3],
+            String::from(".fq"),
+        );
+        opts.paired = true;
+        let result = fqgrep_from_opts(&opts);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Expected 0 or 1 output files, got 3")
+        );
     }
 }
