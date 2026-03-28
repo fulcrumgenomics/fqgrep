@@ -14,8 +14,10 @@
 use anyhow::Result;
 use itertools::{self, Itertools};
 use seq_io::fastq::{self, Record, RecordSet, RefRecord};
+use seq_io::parallel::{ReusableReader, read_parallel_init};
 use seq_io::parallel_record_impl;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::io;
 
 parallel_record_impl!(
@@ -230,3 +232,161 @@ impl<'a> std::iter::IntoIterator for &'a RecordSetTuple {
         }
     }
 }
+
+/// A data set wrapper that carries a dispatch sequence number for ordered output.
+pub(crate) struct OrderedDataSet<D> {
+    inner: D,
+    seq: u64,
+}
+
+impl<D: Default> Default for OrderedDataSet<D> {
+    fn default() -> Self {
+        Self {
+            inner: D::default(),
+            seq: 0,
+        }
+    }
+}
+
+/// Wraps a reader to assign monotonically increasing sequence numbers to each batch.
+/// Sequence numbers are assigned in `fill_data`, which runs sequentially in the reader thread.
+pub(crate) struct OrderedReader<R: seq_io::parallel::Reader> {
+    inner: R,
+    next_seq: u64,
+}
+
+impl<R: seq_io::parallel::Reader> OrderedReader<R> {
+    pub fn new(inner: R) -> Self {
+        Self { inner, next_seq: 0 }
+    }
+}
+
+impl<R: seq_io::parallel::Reader> seq_io::parallel::Reader for OrderedReader<R>
+where
+    R::DataSet: Send,
+{
+    type DataSet = OrderedDataSet<R::DataSet>;
+    type Err = R::Err;
+
+    fn fill_data(
+        &mut self,
+        data: &mut Self::DataSet,
+    ) -> Option<std::result::Result<(), Self::Err>> {
+        let result = self.inner.fill_data(&mut data.inner);
+        if let Some(Ok(())) = &result {
+            data.seq = self.next_seq;
+            self.next_seq += 1;
+        }
+        result
+    }
+}
+
+/// Generates an ordered parallel processing function that preserves input order in output.
+/// Uses `OrderedReader` to tag batches with sequence numbers and a `BTreeMap` reorder buffer
+/// to yield results in dispatch order rather than completion order.
+macro_rules! ordered_parallel_record_impl {
+    ($name:ident, $reader:ty, $dataset:ty, $record:ty, $err:ty) => {
+        /// Processes records in parallel while preserving input order in the output.
+        /// When a batch arrives out of order, its record set and per-record data are moved
+        /// into a reorder buffer via `mem::take` and yielded later in the correct sequence.
+        pub fn $name<R, D, W, F, Out>(
+            reader: $reader,
+            n_threads: u32,
+            queue_len: usize,
+            work: W,
+            mut func: F,
+        ) -> std::result::Result<Option<Out>, $err>
+        where
+            R: io::Read + Send,
+            D: Default + Send,
+            W: Send + Sync + Fn($record, &mut D),
+            F: FnMut($record, &mut D) -> Option<Out>,
+        {
+            read_parallel_init::<_, $err, _, _, _, _, $err, _, _, _>(
+                n_threads,
+                queue_len,
+                move || {
+                    Ok::<_, $err>(ReusableReader::<OrderedReader<$reader>, (Vec<D>, ())>::new(
+                        OrderedReader::new(reader),
+                    ))
+                },
+                || Ok::<_, $err>((OrderedDataSet::<$dataset>::default(), (Vec::<D>::new(), ()))),
+                |data: &mut (OrderedDataSet<$dataset>, (Vec<D>, ()))| {
+                    let recordset = &data.0.inner;
+                    let out = &mut (data.1).0;
+                    let mut record_iter = recordset.into_iter();
+                    for (d, record) in out.iter_mut().zip(&mut record_iter) {
+                        work(record, d);
+                    }
+                    for record in record_iter {
+                        out.push(D::default());
+                        work(record, out.last_mut().unwrap());
+                    }
+                    Ok::<_, $err>(())
+                },
+                |records| {
+                    let mut next_seq: u64 = 0;
+                    let mut buffer: BTreeMap<u64, ($dataset, Vec<D>)> = BTreeMap::new();
+
+                    while let Some(result) = records.next() {
+                        let (data, work_result) = result?;
+                        work_result?;
+                        let seq = data.0.seq;
+
+                        if seq == next_seq {
+                            for (record, d) in
+                                (&data.0.inner).into_iter().zip((data.1).0.iter_mut())
+                            {
+                                if let Some(out) = func(record, d) {
+                                    return Ok(Some(out));
+                                }
+                            }
+                            next_seq += 1;
+                            while let Some((rset, mut outs)) = buffer.remove(&next_seq) {
+                                for (record, d) in (&rset).into_iter().zip(outs.iter_mut()) {
+                                    if let Some(out) = func(record, d) {
+                                        return Ok(Some(out));
+                                    }
+                                }
+                                next_seq += 1;
+                            }
+                        } else {
+                            buffer.insert(
+                                seq,
+                                (
+                                    std::mem::take(&mut data.0.inner),
+                                    std::mem::take(&mut (data.1).0),
+                                ),
+                            );
+                        }
+                    }
+                    Ok(None)
+                },
+            )?
+        }
+    };
+}
+
+ordered_parallel_record_impl!(
+    ordered_parallel_fastq,
+    fastq::Reader<R>,
+    RecordSet,
+    fastq::RefRecord,
+    fastq::Error
+);
+
+ordered_parallel_record_impl!(
+    ordered_parallel_interleaved_fastq,
+    InterleavedFastqReader<R>,
+    InterleavedRecordSet,
+    (fastq::RefRecord, fastq::RefRecord),
+    fastq::Error
+);
+
+ordered_parallel_record_impl!(
+    ordered_parallel_paired_fastq,
+    PairedFastqReader<R>,
+    RecordSetTuple,
+    (fastq::RefRecord, fastq::RefRecord),
+    fastq::Error
+);

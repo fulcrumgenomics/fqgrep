@@ -10,7 +10,9 @@ use env_logger::Env;
 use flate2::bufread::MultiGzDecoder;
 use fqgrep_lib::matcher::{Matcher, MatcherFactory, MatcherOpts, validate_fixed_pattern};
 use fqgrep_lib::seq_io::{
-    InterleavedFastqReader, PairedFastqReader, parallel_interleaved_fastq, parallel_paired_fastq,
+    InterleavedFastqReader, PairedFastqReader, ordered_parallel_fastq,
+    ordered_parallel_interleaved_fastq, ordered_parallel_paired_fastq, parallel_interleaved_fastq,
+    parallel_paired_fastq,
 };
 use fqgrep_lib::{is_fastq_path, is_gzip_path};
 use gzp::BUFSIZE;
@@ -197,6 +199,12 @@ struct Opts {
     /// is standard input, then treat the input as interlaved paired end reads.
     #[clap(long)]
     paired: bool,
+
+    /// Do not preserve input order in output.  By default, output records are written in the same
+    /// order as the input, even when using multiple threads.  This option disables the reorder
+    /// buffer, which may slightly reduce memory usage at the cost of non-deterministic output order.
+    #[clap(long)]
+    no_order: bool,
 
     /// Search the reverse complement for matches.
     #[clap(long)]
@@ -543,17 +551,53 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
         // Either an interleaved paired end FASTQ, or pairs of FASTQs
         if files.len() == 1 {
             // Interleaved paired end FASTQ
-            parallel_interleaved_fastq(
-                InterleavedFastqReader::new(spawn_reader(
-                    files.first().unwrap().clone(),
-                    opts.decompress,
-                )?),
-                opts.threads as u32,
-                opts.threads,
-                |(read1, read2), found| {
+            let reader = InterleavedFastqReader::new(spawn_reader(
+                files.first().unwrap().clone(),
+                opts.decompress,
+            )?);
+            let work = |(read1, read2): (RefRecord, RefRecord), found: &mut u32| {
+                *found = process_paired_reads(&read1, &read2, &matcher, &progress_logger);
+            };
+            let func = |(read1, read2): (RefRecord, RefRecord), found: &mut u32| {
+                if *found > 0 {
+                    num_matches += 1;
+                    write_paired_record(
+                        &read1,
+                        &read2,
+                        *found,
+                        color,
+                        &matcher,
+                        &mut r1_writer,
+                        &mut r2_writer,
+                    );
+                }
+                None::<()>
+            };
+            if opts.no_order || opts.count {
+                parallel_interleaved_fastq(reader, opts.threads as u32, opts.threads, work, func)
+                    .unwrap();
+            } else {
+                ordered_parallel_interleaved_fastq(
+                    reader,
+                    opts.threads as u32,
+                    opts.threads,
+                    work,
+                    func,
+                )
+                .unwrap();
+            }
+        } else {
+            // // Pairs of FASTQ files
+            for file_pairs in files.chunks_exact(2) {
+                let reader1: fastq::Reader<Box<dyn Read + Send>> =
+                    spawn_reader(file_pairs[0].clone(), opts.decompress)?;
+                let reader2: fastq::Reader<Box<dyn Read + Send>> =
+                    spawn_reader(file_pairs[1].clone(), opts.decompress)?;
+                let reader = PairedFastqReader::new(reader1, reader2);
+                let work = |(read1, read2): (RefRecord, RefRecord), found: &mut u32| {
                     *found = process_paired_reads(&read1, &read2, &matcher, &progress_logger);
-                },
-                |(read1, read2), found| {
+                };
+                let func = |(read1, read2): (RefRecord, RefRecord), found: &mut u32| {
                     if *found > 0 {
                         num_matches += 1;
                         write_paired_record(
@@ -567,41 +611,20 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
                         );
                     }
                     None::<()>
-                },
-            )
-            .unwrap();
-        } else {
-            // // Pairs of FASTQ files
-            for file_pairs in files.chunks_exact(2) {
-                let reader1: fastq::Reader<Box<dyn Read + Send>> =
-                    spawn_reader(file_pairs[0].clone(), opts.decompress)?;
-                let reader2: fastq::Reader<Box<dyn Read + Send>> =
-                    spawn_reader(file_pairs[1].clone(), opts.decompress)?;
-
-                parallel_paired_fastq(
-                    PairedFastqReader::new(reader1, reader2),
-                    opts.threads as u32,
-                    opts.threads,
-                    |(read1, read2), found| {
-                        *found = process_paired_reads(&read1, &read2, &matcher, &progress_logger);
-                    },
-                    |(read1, read2), found| {
-                        if *found > 0 {
-                            num_matches += 1;
-                            write_paired_record(
-                                &read1,
-                                &read2,
-                                *found,
-                                color,
-                                &matcher,
-                                &mut r1_writer,
-                                &mut r2_writer,
-                            );
-                        }
-                        None::<()>
-                    },
-                )
-                .unwrap();
+                };
+                if opts.no_order || opts.count {
+                    parallel_paired_fastq(reader, opts.threads as u32, opts.threads, work, func)
+                        .unwrap();
+                } else {
+                    ordered_parallel_paired_fastq(
+                        reader,
+                        opts.threads as u32,
+                        opts.threads,
+                        work,
+                        func,
+                    )
+                    .unwrap();
+                }
             }
         }
     } else {
@@ -609,35 +632,35 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
         for file in files {
             let reader: fastq::Reader<Box<dyn Read + Send>> =
                 spawn_reader(file.clone(), opts.decompress)?;
-            parallel_fastq(
-                reader,
-                opts.threads as u32,
-                opts.threads,
-                |record, found| {
-                    if let Some(progress) = &progress_logger {
-                        progress.record();
-                    }
-                    *found = matcher.read_match(&record);
-                },
-                |record, found| {
-                    if *found {
-                        num_matches += 1;
-                        if let Some(writer) = &mut r1_writer {
-                            if color {
-                                let mut record = record.to_owned_record();
-                                matcher.color(&mut record, *found);
-                                fastq::write_to(writer, record.head(), record.seq(), record.qual())
-                                    .unwrap();
-                            } else {
-                                fastq::write_to(writer, record.head(), record.seq(), record.qual())
-                                    .unwrap();
-                            }
+            let work = |record: RefRecord, found: &mut bool| {
+                if let Some(progress) = &progress_logger {
+                    progress.record();
+                }
+                *found = matcher.read_match(&record);
+            };
+            let func = |record: RefRecord, found: &mut bool| {
+                if *found {
+                    num_matches += 1;
+                    if let Some(writer) = &mut r1_writer {
+                        if color {
+                            let mut record = record.to_owned_record();
+                            matcher.color(&mut record, *found);
+                            fastq::write_to(writer, record.head(), record.seq(), record.qual())
+                                .unwrap();
+                        } else {
+                            fastq::write_to(writer, record.head(), record.seq(), record.qual())
+                                .unwrap();
                         }
                     }
-                    None::<()>
-                },
-            )
-            .unwrap();
+                }
+                None::<()>
+            };
+            if opts.no_order || opts.count {
+                parallel_fastq(reader, opts.threads as u32, opts.threads, work, func).unwrap();
+            } else {
+                ordered_parallel_fastq(reader, opts.threads as u32, opts.threads, work, func)
+                    .unwrap();
+            }
         }
     }
 
@@ -866,6 +889,7 @@ pub mod tests {
             invert_match: false,
             decompress: false,
             paired: false,
+            no_order: false,
             reverse_complement: false,
             progress: true,
             protein: false,
@@ -1495,5 +1519,72 @@ pub mod tests {
             result.is_err(),
             "Should return error for excessive IUPAC expansion"
         );
+    }
+
+    // ############################################################################################
+    // Tests for --no-order flag (unordered parallel dispatch)
+    // ############################################################################################
+
+    #[rstest]
+    #[case(false)] // unpaired
+    #[case(true)] // paired (interleaved single-file)
+    fn test_no_order_count(#[case] paired: bool) {
+        let dir = TempDir::new().unwrap();
+        let seqs = vec![vec!["AAAA", "TTTT"], vec!["GGGG", "CCCC"]];
+        let pattern = vec![String::from("A")];
+        let mut opts = build_opts(&dir, &seqs, &pattern, true, Vec::new(), String::from(".fq"));
+        opts.no_order = true;
+        opts.paired = paired;
+        let result = fqgrep_from_opts(&opts);
+        assert_eq!(result.unwrap(), 1);
+    }
+
+    #[test]
+    fn test_no_order_unpaired_output() {
+        let dir = TempDir::new().unwrap();
+        let seqs = vec![vec!["AAAA", "TTTT", "ATAT", "TATA"]];
+        let out_path = dir.path().join("output.fq");
+        let pattern = vec![String::from("A")];
+        let mut opts = build_opts(
+            &dir,
+            &seqs,
+            &pattern,
+            true,
+            vec![out_path.clone()],
+            String::from(".fq"),
+        );
+        opts.no_order = true;
+        let _result = fqgrep_from_opts(&opts);
+        let mut return_sequences = slurp_output(out_path);
+        return_sequences.sort();
+        let mut expected = vec!["AAAA", "ATAT", "TATA"];
+        expected.sort();
+        assert_eq!(return_sequences, expected);
+    }
+
+    #[test]
+    fn test_no_order_paired_interleaved_output() {
+        let dir = TempDir::new().unwrap();
+        // Two files create interleaved pairs: (AAAA, CCCC), (TTTT, GGGG)
+        let seqs = vec![vec!["AAAA", "TTTT"], vec!["CCCC", "GGGG"]];
+        let out_path = dir.path().join("output.fq");
+        let pattern = vec![String::from("A")];
+        let mut opts = build_opts(
+            &dir,
+            &seqs,
+            &pattern,
+            true,
+            vec![out_path.clone()],
+            String::from(".fq"),
+        );
+        opts.no_order = true;
+        opts.paired = true;
+        let _result = fqgrep_from_opts(&opts);
+        let mut return_sequences = slurp_output(out_path);
+        return_sequences.sort();
+        // Pair (AAAA, CCCC) matches because R1 contains "A"
+        let mut expected = vec!["AAAA", "CCCC"];
+        expected.sort();
+        assert_eq!(return_sequences, expected);
     }
 }

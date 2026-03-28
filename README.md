@@ -121,6 +121,9 @@ Options:
       --paired
           Treat the input files as paired.  The number of input files must be a multiple of two, with the first file being R1, second R2, third R1, fourth R2, and so on.  If the pattern matches either R1 or R2, then both R1 and R2 will be output (interleaved).  If the input is standard input, then treat the input as interlaved paired end reads
 
+      --no-order
+          Do not preserve input order in output.  By default, output records are written in the same order as the input, even when using multiple threads.  This option disables the reorder buffer, which may slightly reduce memory usage at the cost of non-deterministic output order
+
       --reverse-complement
           Search the reverse complement for matches
 
