@@ -3,6 +3,7 @@ use bitvec::prelude::*;
 use seq_io::fastq::RefRecord;
 use std::ops::Range;
 
+use crate::AMINO_ACIDS;
 use crate::DNA_BASES;
 use crate::color::{COLOR_BACKGROUND, COLOR_BASES, COLOR_QUALS};
 use crate::color::{color_background, color_head};
@@ -119,13 +120,19 @@ fn bases_colored(
     (colored_bases, colored_quals)
 }
 
-/// Validates that a given FIXED pattern contains only valid DNA bases (ACGTN)
-pub fn validate_fixed_pattern(pattern: &str) -> Result<()> {
+/// Validates that a given FIXED pattern contains only valid bases (DNA or amino acid)
+pub fn validate_fixed_pattern(pattern: &str, protein: bool) -> Result<()> {
+    let valid_chars = if protein {
+        &AMINO_ACIDS[..]
+    } else {
+        &DNA_BASES[..]
+    };
+    let kind = if protein { "amino acids" } else { "DNA bases" };
     for (index, base) in pattern.char_indices() {
-        if !base.is_ascii() || !DNA_BASES.contains(&(base as u8)) {
+        if !base.is_ascii() || !valid_chars.contains(&(base as u8)) {
             let next_index = index + base.len_utf8();
             bail!(
-                "Fixed pattern must contain only DNA bases: {} .. [{}] .. {}",
+                "Fixed pattern must contain only {kind}: {} .. [{}] .. {}",
                 &pattern[0..index],
                 &pattern[index..next_index],
                 &pattern[next_index..],
@@ -718,17 +725,33 @@ pub mod tests {
     // Tests validate_fixed_pattern()
     // ############################################################################################
 
-    #[test]
-    fn test_validate_fixed_pattern_is_ok() {
-        let pattern = "AGTGTGATG";
-        let result = validate_fixed_pattern(pattern);
+    #[rstest]
+    #[case("AGTGTGATG", false)]
+    #[case("QRNQRNQRN", true)]
+    #[case("ARNDCEQGHILKMFPSTWYV", true)] // all standard 20
+    #[case("BJOUXZ", true)] // extended IUPAC: B, J, O, U, X, Z
+    fn test_validate_fixed_pattern_is_ok(#[case] pattern: &str, #[case] protein: bool) {
+        let result = validate_fixed_pattern(pattern, protein);
         assert!(result.is_ok());
     }
-    #[test]
-    fn test_validate_fixed_pattern_error() {
-        let pattern = "AXGTGTGATG";
-        let msg = String::from("Fixed pattern must contain only DNA bases: A .. [X] .. GTGTGATG");
-        let result = validate_fixed_pattern(pattern);
+
+    #[rstest]
+    #[case(
+        "AXGTGTGATG",
+        false,
+        "Fixed pattern must contain only DNA bases: A .. [X] .. GTGTGATG"
+    )]
+    #[case(
+        "QRN1QRN",
+        true,
+        "Fixed pattern must contain only amino acids: QRN .. [1] .. QRN"
+    )]
+    fn test_validate_fixed_pattern_error(
+        #[case] pattern: &str,
+        #[case] protein: bool,
+        #[case] msg: &str,
+    ) {
+        let result = validate_fixed_pattern(pattern, protein);
         let inner = result.unwrap_err().to_string();
         assert_eq!(inner, msg);
     }
@@ -738,7 +761,7 @@ pub mod tests {
         // A non-ASCII character whose low byte happens to match 'A' (0x41)
         // U+0141 (Latin capital letter L with stroke) has value 321, low byte = 0x41 = 'A'
         let pattern = "AC\u{0141}T";
-        let result = validate_fixed_pattern(pattern);
+        let result = validate_fixed_pattern(pattern, false);
         assert!(result.is_err());
         assert!(
             result

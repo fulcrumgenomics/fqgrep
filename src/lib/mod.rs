@@ -11,6 +11,7 @@ pub mod seq_io;
 use std::{borrow::Borrow, path::Path, sync::LazyLock};
 
 pub const DNA_BASES: [u8; 5] = *b"ACGTN";
+pub const AMINO_ACIDS: [u8; 26] = *b"ARNDCEQGHILKMFPSTWYVBJOUXZ";
 pub const IUPAC_BASES: [u8; 15] = *b"AGCTYRWSKMDVHBN";
 pub const IUPAC_BASES_COMPLEMENT: [u8; 15] = *b"TCGARYWSMKHBDVN";
 

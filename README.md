@@ -127,6 +127,9 @@ Options:
       --progress
           Write progress information
 
+      --protein
+          The input files contain protein sequences (amino acids), not DNA sequences
+
   -h, --help
           Print help (see a summary with '-h')
 
