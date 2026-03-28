@@ -396,24 +396,24 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
         } else if split_paired_output {
             let w1 = Box::new(BufWriter::with_capacity(
                 BUFSIZE,
-                File::create(&opts.output[0]).unwrap(),
+                File::create(&opts.output[0])
+                    .with_context(|| format!("Error creating output: {}", opts.output[0].display()))?,
             ));
             let w2 = Box::new(BufWriter::with_capacity(
                 BUFSIZE,
-                File::create(&opts.output[1]).unwrap(),
+                File::create(&opts.output[1])
+                    .with_context(|| format!("Error creating output: {}", opts.output[1].display()))?,
             ));
             (Some(w1), Some(w2))
         } else if let Some(file_path) = opts.output.first() {
             let w = Box::new(BufWriter::with_capacity(
                 BUFSIZE,
-                File::create(file_path).unwrap(),
+                File::create(file_path)
+                    .with_context(|| format!("Error creating output: {}", file_path.display()))?,
             ));
             (Some(w), None)
         } else {
-            let w = Box::new(BufWriter::with_capacity(
-                BUFSIZE,
-                std::io::stdout(),
-            ));
+            let w = Box::new(BufWriter::with_capacity(BUFSIZE, std::io::stdout()));
             (Some(w), None)
         }
     };
@@ -565,7 +565,6 @@ fn write_record(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 /// Writes a matched paired-end read pair to the output writer(s).
 ///
 /// When `split_paired_output` is true, R1 goes to `r1_writer` and R2 goes to `r2_writer`.
@@ -574,6 +573,7 @@ fn write_record(
 /// When `color` is true, the read that triggered the match is colored with match highlighting
 /// and the other read is colored with background highlighting.  When coloring, the second read
 /// is always re-matched to determine if it independently matches (for correct highlighting).
+#[allow(clippy::too_many_arguments)]
 fn write_paired_record(
     read1: &RefRecord,
     read2: &RefRecord,
