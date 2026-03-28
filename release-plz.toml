@@ -1,0 +1,8 @@
+[workspace]
+changelog_config = "cliff.toml"
+dependencies_update = true
+pr_labels = ["release"]
+# Handled by the publish workflow's "Create GitHub release" step
+git_release_enable = false
+# Enable after verifying semver compatibility with previous crates.io release
+semver_check = false
