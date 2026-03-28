@@ -1,13 +1,16 @@
 use ahash::AHashSet;
 use aho_corasick::AhoCorasick;
+use bio::data_structures::bitenc::BitEnc;
 use bitvec::prelude::*;
 use seq_io::fastq::RefRecord;
 use std::ops::Range;
 
 use crate::AMINO_ACIDS;
 use crate::DNA_BASES;
+use crate::DNA_MASK_VALUES;
 use crate::color::{COLOR_BACKGROUND, COLOR_BASES, COLOR_QUALS};
 use crate::color::{color_background, color_head};
+use crate::encode;
 use crate::reverse_complement;
 use anyhow::{Context, Result, bail};
 use bstr::ByteSlice;
@@ -301,6 +304,188 @@ impl FixedStringSetMatcher {
     }
 }
 
+/// Iterates over matching offsets where `needle` matches within `bases` using bitwise AND.
+/// When `has_iupac` is false, uses a rolling additive hash to skip non-matching offsets.
+/// Calls `on_match` for each matching offset; if it returns `false`, iteration stops early.
+fn bitenc_match_offsets(
+    bases: &BitEnc,
+    needle: &BitEnc,
+    has_iupac: bool,
+    mut on_match: impl FnMut(usize) -> bool,
+) {
+    if bases.nr_symbols() < needle.nr_symbols() {
+        return;
+    }
+
+    let mut bases_hash: usize = 0;
+    let needle_hash = if has_iupac {
+        0
+    } else {
+        (0..needle.nr_symbols())
+            .map(|i| needle.get(i).unwrap() as usize)
+            .sum()
+    };
+
+    'outer: for offset in 0..=bases.nr_symbols() - needle.nr_symbols() {
+        if !has_iupac {
+            if offset == 0 {
+                bases_hash = (0..needle.nr_symbols())
+                    .map(|i| bases.get(i).unwrap() as usize)
+                    .sum();
+            } else {
+                bases_hash += bases.get(offset + needle.nr_symbols() - 1).unwrap() as usize;
+                bases_hash -= bases.get(offset - 1).unwrap() as usize;
+            }
+            if bases_hash != needle_hash {
+                continue 'outer;
+            }
+        }
+        for i in 0..needle.nr_symbols() {
+            let base = bases.get(offset + i).unwrap();
+            if needle.get(i).unwrap() & base != base {
+                continue 'outer;
+            }
+        }
+        if !on_match(offset) {
+            return;
+        }
+    }
+}
+
+/// Finds all positions where `needle` matches within `bases` using bitwise AND matching.
+/// When `has_iupac` is false, uses a rolling additive hash to skip non-matching offsets.
+fn bitenc_find_all(bases: &BitEnc, needle: &BitEnc, has_iupac: bool) -> Vec<Range<usize>> {
+    let mut ranges: Vec<Range<usize>> = Vec::new();
+    let needle_len = needle.nr_symbols();
+    bitenc_match_offsets(bases, needle, has_iupac, |offset| {
+        ranges.push(offset..offset + needle_len);
+        true
+    });
+    ranges
+}
+
+/// Returns true if `needle` matches anywhere within `bases` using bitwise AND matching.
+/// When `has_iupac` is false, uses a rolling additive hash to skip non-matching offsets.
+fn bitenc_find(bases: &BitEnc, needle: &BitEnc, has_iupac: bool) -> bool {
+    let mut found = false;
+    bitenc_match_offsets(bases, needle, has_iupac, |_| {
+        found = true;
+        false // stop after first match
+    });
+    found
+}
+
+/// Returns true if the encoded pattern contains any IUPAC ambiguity codes
+/// (i.e., any symbol that is not a single DNA base mask value).
+fn bitenc_has_iupac(bitenc: &BitEnc) -> bool {
+    !bitenc.iter().all(|value| DNA_MASK_VALUES.contains(&value))
+}
+
+/// Matcher for a single IUPAC bitmask pattern
+pub struct BitMaskMatcher {
+    bitenc: BitEnc,
+    has_iupac: bool,
+    opts: MatcherOpts,
+}
+
+impl Matcher for BitMaskMatcher {
+    #[inline]
+    fn bases_match(&self, bases: &[u8]) -> bool {
+        let bases = encode(bases);
+        bitenc_find(&bases, &self.bitenc, self.has_iupac) != self.opts.invert_match
+    }
+
+    fn color_matched_bases(&self, bases: &[u8], quals: &[u8]) -> (Vec<u8>, Vec<u8>) {
+        let encoded_bases = encode(bases);
+        let ranges = bitenc_find_all(&encoded_bases, &self.bitenc, self.has_iupac);
+        if self.opts().reverse_complement {
+            let bases_revcomp = &reverse_complement(bases);
+            let encoded_revcomp = encode(bases_revcomp);
+            let ranges_revcomp = bitenc_find_all(&encoded_revcomp, &self.bitenc, self.has_iupac)
+                .into_iter()
+                .map(|range| Range {
+                    start: bases.len() - range.start - range.len(),
+                    end: bases.len() - range.start,
+                });
+            bases_colored(bases, quals, ranges.into_iter().chain(ranges_revcomp))
+        } else {
+            bases_colored(bases, quals, ranges.into_iter())
+        }
+    }
+
+    #[inline]
+    fn opts(&self) -> MatcherOpts {
+        self.opts
+    }
+}
+
+impl BitMaskMatcher {
+    pub fn new(bitenc: BitEnc, opts: MatcherOpts) -> Self {
+        let has_iupac = bitenc_has_iupac(&bitenc);
+        Self {
+            bitenc,
+            has_iupac,
+            opts,
+        }
+    }
+}
+
+/// Matcher for a set of IUPAC bitmask patterns
+pub struct BitMaskSetMatcher {
+    bitencs: Vec<BitEnc>,
+    has_iupac: Vec<bool>,
+    opts: MatcherOpts,
+}
+
+impl Matcher for BitMaskSetMatcher {
+    fn bases_match(&self, bases: &[u8]) -> bool {
+        let bases = encode(bases);
+        self.bitencs
+            .iter()
+            .enumerate()
+            .any(|(index, needle)| bitenc_find(&bases, needle, self.has_iupac[index]))
+            != self.opts.invert_match
+    }
+
+    fn color_matched_bases(&self, bases: &[u8], quals: &[u8]) -> (Vec<u8>, Vec<u8>) {
+        let encoded_bases = encode(bases);
+        let ranges = self.bitencs.iter().enumerate().flat_map(|(index, needle)| {
+            bitenc_find_all(&encoded_bases, needle, self.has_iupac[index])
+        });
+        if self.opts().reverse_complement {
+            let bases_revcomp = &reverse_complement(bases);
+            let encoded_revcomp = encode(bases_revcomp);
+            let ranges_revcomp = self.bitencs.iter().enumerate().flat_map(|(index, needle)| {
+                bitenc_find_all(&encoded_revcomp, needle, self.has_iupac[index])
+                    .into_iter()
+                    .map(|range| Range {
+                        start: bases.len() - range.start - range.len(),
+                        end: bases.len() - range.start,
+                    })
+            });
+            bases_colored(bases, quals, ranges.chain(ranges_revcomp))
+        } else {
+            bases_colored(bases, quals, ranges)
+        }
+    }
+
+    #[inline]
+    fn opts(&self) -> MatcherOpts {
+        self.opts
+    }
+}
+
+impl BitMaskSetMatcher {
+    pub fn new(bitencs: Vec<BitEnc>, opts: MatcherOpts) -> Self {
+        let has_iupac = bitencs.iter().map(bitenc_has_iupac).collect();
+        Self {
+            bitencs,
+            has_iupac,
+            opts,
+        }
+    }
+}
+
 /// Matcher for a regular expression pattern
 pub struct RegexMatcher {
     regex: Regex,
@@ -461,13 +646,33 @@ impl MatcherFactory {
         pattern: &Option<String>,
         fixed_strings: bool,
         regexp: &Vec<String>,
+        bitencs: Option<Vec<BitEnc>>,
         match_opts: MatcherOpts,
     ) -> Result<Box<dyn Matcher + Sync + Send>> {
-        match (fixed_strings, &pattern) {
-            (true, Some(pattern)) => Ok(Box::new(FixedStringMatcher::new(pattern, match_opts))),
-            (false, Some(pattern)) => Ok(Box::new(RegexMatcher::new(pattern, match_opts)?)),
-            (true, None) => Ok(Box::new(FixedStringSetMatcher::new(regexp, match_opts)?)),
-            (false, None) => Ok(Box::new(RegexSetMatcher::new(regexp, match_opts)?)),
+        let use_bitmask = bitencs.is_some();
+        let is_single = pattern.is_some();
+        match (use_bitmask, is_single, fixed_strings) {
+            (true, true, _) => {
+                let bitencs = bitencs.unwrap();
+                Ok(Box::new(BitMaskMatcher::new(
+                    bitencs.into_iter().next().unwrap(),
+                    match_opts,
+                )))
+            }
+            (true, false, _) => Ok(Box::new(BitMaskSetMatcher::new(
+                bitencs.unwrap(),
+                match_opts,
+            ))),
+            (false, true, true) => Ok(Box::new(FixedStringMatcher::new(
+                pattern.as_ref().unwrap(),
+                match_opts,
+            ))),
+            (false, true, false) => Ok(Box::new(RegexMatcher::new(
+                pattern.as_ref().unwrap(),
+                match_opts,
+            )?)),
+            (false, false, true) => Ok(Box::new(FixedStringSetMatcher::new(regexp, match_opts)?)),
+            (false, false, false) => Ok(Box::new(RegexSetMatcher::new(regexp, match_opts)?)),
         }
     }
 
@@ -483,6 +688,7 @@ impl MatcherFactory {
 // Tests
 #[cfg(test)]
 pub mod tests {
+    use crate::encode;
     use crate::matcher::*;
     use ahash::AHashSet;
     use rstest::rstest;
@@ -830,6 +1036,236 @@ pub mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("Fixed pattern must contain only DNA bases")
+        );
+    }
+
+    // ############################################################################################
+    // Tests BitMaskMatcher: has_iupac detection
+    // ############################################################################################
+
+    #[test]
+    fn test_bitmask_matcher_dna_only_has_no_iupac() {
+        let opts = MatcherOpts {
+            invert_match: false,
+            reverse_complement: false,
+        };
+        let bitenc = encode(b"ACGT");
+        let matcher = BitMaskMatcher::new(bitenc, opts);
+        assert!(
+            !matcher.has_iupac,
+            "DNA-only pattern should have has_iupac=false"
+        );
+    }
+
+    #[test]
+    fn test_bitmask_matcher_iupac_pattern_has_iupac() {
+        let opts = MatcherOpts {
+            invert_match: false,
+            reverse_complement: false,
+        };
+        let bitenc = encode(b"ACRT");
+        let matcher = BitMaskMatcher::new(bitenc, opts);
+        assert!(
+            matcher.has_iupac,
+            "IUPAC pattern should have has_iupac=true"
+        );
+    }
+
+    // ############################################################################################
+    // Tests BitMaskMatcher: edge cases
+    // ############################################################################################
+
+    #[test]
+    fn test_bitmask_matcher_read_shorter_than_pattern() {
+        let opts = MatcherOpts {
+            invert_match: false,
+            reverse_complement: false,
+        };
+        let bitenc = encode(b"ACGTACGT");
+        let matcher = BitMaskMatcher::new(bitenc, opts);
+        let seq = "ACG";
+        let qual = (0..seq.len()).map(|_| "X").collect::<String>();
+        let record = format!("@id\n{seq}\n+\n{qual}\n");
+        let mut reader = seq_io::fastq::Reader::new(record.as_bytes());
+        let read_record = reader.next().unwrap().unwrap();
+        assert!(!matcher.read_match(&read_record));
+    }
+
+    #[test]
+    fn test_bitmask_set_matcher_read_shorter_than_pattern() {
+        let opts = MatcherOpts {
+            invert_match: false,
+            reverse_complement: false,
+        };
+        let bitencs = vec![encode(b"ACGTACGT")];
+        let matcher = BitMaskSetMatcher::new(bitencs, opts);
+        let seq = "ACG";
+        let qual = (0..seq.len()).map(|_| "X").collect::<String>();
+        let record = format!("@id\n{seq}\n+\n{qual}\n");
+        let mut reader = seq_io::fastq::Reader::new(record.as_bytes());
+        let read_record = reader.next().unwrap().unwrap();
+        assert!(!matcher.read_match(&read_record));
+    }
+
+    // ############################################################################################
+    // Test BitMaskMatcher::read_match() with DNA-only patterns
+    // ############################################################################################
+
+    #[rstest]
+    #[case(false, "AG", "AGG", true)]
+    #[case(false, "CC", "AGG", false)]
+    #[case(true, "CC", "AGG", true)]
+    #[case(true, "TT", "AGG", false)]
+    #[case(false, "AT", "ATGAT", true)]
+    #[case(true, "CG", "GCCG", true)]
+    #[case(false, "AGAG", "AGAGAGAG", true)]
+    #[case(true, "TCTC", "AGAGAGAG", true)]
+    fn test_bitmask_matcher_dna_read_match(
+        #[case] reverse_complement: bool,
+        #[case] pattern: &str,
+        #[case] seq: &str,
+        #[case] expected: bool,
+    ) {
+        let invert_matches = [true, false];
+        for invert_match in IntoIterator::into_iter(invert_matches) {
+            let opts = MatcherOpts {
+                invert_match,
+                reverse_complement,
+            };
+            let matcher = BitMaskMatcher::new(encode(pattern.as_bytes()), opts);
+            let qual = (0..seq.len()).map(|_| "X").collect::<String>();
+            let record = format!("@id\n{seq}\n+\n{qual}\n");
+            let mut reader = seq_io::fastq::Reader::new(record.as_bytes());
+            let read_record = reader.next().unwrap().unwrap();
+            let result = matcher.read_match(&read_record);
+            if invert_match {
+                assert_ne!(result, expected);
+            } else {
+                assert_eq!(result, expected);
+            }
+        }
+    }
+
+    // ############################################################################################
+    // Test BitMaskMatcher::read_match() with IUPAC patterns
+    // ############################################################################################
+
+    #[rstest]
+    #[case(false, "GATK", "GATG", true)]
+    #[case(false, "GATK", "GATT", true)]
+    #[case(false, "GATK", "GATA", false)]
+    #[case(false, "GATK", "GATC", false)]
+    #[case(false, "GATR", "GATGA", true)]
+    #[case(false, "GATR", "GATA", true)]
+    #[case(false, "GATR", "GATGT", true)]
+    #[case(false, "N", "A", true)]
+    #[case(false, "N", "C", true)]
+    #[case(false, "N", "G", true)]
+    #[case(false, "N", "T", true)]
+    #[case(false, "ANA", "ACA", true)]
+    #[case(false, "ANA", "AAA", true)]
+    #[case(true, "GATK", "CATC", true)]
+    fn test_bitmask_matcher_iupac_read_match(
+        #[case] reverse_complement: bool,
+        #[case] pattern: &str,
+        #[case] seq: &str,
+        #[case] expected: bool,
+    ) {
+        let opts = MatcherOpts {
+            invert_match: false,
+            reverse_complement,
+        };
+        let matcher = BitMaskMatcher::new(encode(pattern.as_bytes()), opts);
+        let qual = (0..seq.len()).map(|_| "X").collect::<String>();
+        let record = format!("@id\n{seq}\n+\n{qual}\n");
+        let mut reader = seq_io::fastq::Reader::new(record.as_bytes());
+        let read_record = reader.next().unwrap().unwrap();
+        assert_eq!(
+            matcher.read_match(&read_record),
+            expected,
+            "pattern={} seq={} revcomp={}",
+            pattern,
+            seq,
+            reverse_complement
+        );
+    }
+
+    // ############################################################################################
+    // Tests BitMaskSetMatcher::read_match() with DNA-only patterns
+    // ############################################################################################
+
+    #[rstest]
+    #[case(false, vec!["A", "AGG", "G"], "AGGG", true)]
+    #[case(true, vec!["A", "AGG", "G"], "TCCC", true)]
+    #[case(false, vec!["A", "AGG", "G"], "TTTT", false)]
+    #[case(true, vec!["T", "AAA"], "CCCCC", false)]
+    #[case(false, vec!["AGG", "C", "TT"], "AGGTT", true)]
+    #[case(true, vec!["AGG", "C", "TT"], "GGGGG", true)]
+    #[case(false, vec!["AC", "TT"], "TTACGTT", true)]
+    #[case(true, vec!["GT", "AA"], "TTACGTT", true)]
+    #[case(false, vec!["GAGA","AGTT"], "GAGAGTT", true)]
+    #[case(true, vec!["CTCT","AACT"], "GAGAGTT", true)]
+    fn test_bitmask_set_matcher_dna_read_match(
+        #[case] reverse_complement: bool,
+        #[case] patterns: Vec<&str>,
+        #[case] seq: &str,
+        #[case] expected: bool,
+    ) {
+        let invert_matches = [true, false];
+        for invert_match in IntoIterator::into_iter(invert_matches) {
+            let opts = MatcherOpts {
+                invert_match,
+                reverse_complement,
+            };
+            let bitencs: Vec<_> = patterns.iter().map(|p| encode(p.as_bytes())).collect();
+            let matcher = BitMaskSetMatcher::new(bitencs, opts);
+            let qual = (0..seq.len()).map(|_| "X").collect::<String>();
+            let record = format!("@id\n{seq}\n+\n{qual}\n");
+            let mut reader = seq_io::fastq::Reader::new(record.as_bytes());
+            let read_record = reader.next().unwrap().unwrap();
+            let result = matcher.read_match(&read_record);
+            if invert_match {
+                assert_ne!(result, expected);
+            } else {
+                assert_eq!(result, expected);
+            }
+        }
+    }
+
+    // ############################################################################################
+    // Tests BitMaskSetMatcher::read_match() with IUPAC patterns
+    // ############################################################################################
+
+    #[rstest]
+    #[case(false, vec!["GATK", "ANA"], "GATG", true)]
+    #[case(false, vec!["GATK", "ANA"], "ACA", true)]
+    #[case(false, vec!["GATK", "ANA"], "CCCC", false)]
+    #[case(false, vec!["R", "Y"], "A", true)]
+    #[case(false, vec!["R", "Y"], "C", true)]
+    #[case(false, vec!["R", "Y"], "AAAA", true)]
+    fn test_bitmask_set_matcher_iupac_read_match(
+        #[case] reverse_complement: bool,
+        #[case] patterns: Vec<&str>,
+        #[case] seq: &str,
+        #[case] expected: bool,
+    ) {
+        let opts = MatcherOpts {
+            invert_match: false,
+            reverse_complement,
+        };
+        let bitencs: Vec<_> = patterns.iter().map(|p| encode(p.as_bytes())).collect();
+        let matcher = BitMaskSetMatcher::new(bitencs, opts);
+        let qual = (0..seq.len()).map(|_| "X").collect::<String>();
+        let record = format!("@id\n{seq}\n+\n{qual}\n");
+        let mut reader = seq_io::fastq::Reader::new(record.as_bytes());
+        let read_record = reader.next().unwrap().unwrap();
+        assert_eq!(
+            matcher.read_match(&read_record),
+            expected,
+            "patterns={:?} seq={} revcomp={}",
+            patterns,
+            seq,
+            reverse_complement
         );
     }
 }

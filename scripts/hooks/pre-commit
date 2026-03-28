@@ -1,0 +1,53 @@
+#!/bin/bash
+#
+# Pre-commit hook for fqgrep
+#
+# Runs cargo ci-fmt and ci-lint before each commit.
+# ci-test is skipped by default (too slow) but can be enabled with:
+#   FQGREP_PRECOMMIT_TEST=1 git commit
+#
+# To bypass the hook entirely (use sparingly):
+#   git commit --no-verify
+
+set -e
+
+echo "Running pre-commit checks..."
+
+# Check if we're in the right directory
+if [[ ! -f "Cargo.toml" ]]; then
+    echo "Error: Not in fqgrep root directory"
+    exit 1
+fi
+
+# Run formatting check
+echo "==> cargo ci-fmt"
+if ! cargo ci-fmt; then
+    echo ""
+    echo "Formatting check failed!"
+    echo "Run 'cargo fmt' to fix formatting issues."
+    exit 1
+fi
+
+# Run linting check
+echo "==> cargo ci-lint"
+if ! cargo ci-lint; then
+    echo ""
+    echo "Lint check failed!"
+    echo "Fix the clippy warnings above before committing."
+    exit 1
+fi
+
+# Optionally run tests
+if [[ "${FQGREP_PRECOMMIT_TEST:-0}" == "1" ]]; then
+    echo "==> cargo test"
+    if ! cargo test; then
+        echo ""
+        echo "Tests failed!"
+        exit 1
+    fi
+else
+    echo "==> Skipping tests (set FQGREP_PRECOMMIT_TEST=1 to enable)"
+fi
+
+echo ""
+echo "Pre-commit checks passed!"

@@ -1,3 +1,7 @@
+[alias]
+ci-fmt = "fmt --all -- --check"
+ci-lint = "clippy -- -D warnings"
+
 # On Windows MSVC, statically link the C runtime so that the resulting EXE does
 # not depend on the vcruntime DLL.
 #
