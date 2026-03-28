@@ -1268,4 +1268,220 @@ pub mod tests {
             reverse_complement
         );
     }
+
+    // ############################################################################################
+    // Tests for reverse complement matching via FixedStringMatcher
+    // ############################################################################################
+
+    /// Helper: creates a RefRecord from a sequence string and calls `read_match` on the matcher.
+    fn read_match_seq(matcher: &dyn Matcher, seq: &str) -> bool {
+        let qual = "X".repeat(seq.len());
+        let record = format!("@id\n{seq}\n+\n{qual}\n");
+        let mut reader = seq_io::fastq::Reader::new(record.as_bytes());
+        let rec = reader.next().unwrap().unwrap();
+        matcher.read_match(&rec)
+    }
+
+    #[test]
+    fn test_rc_match_simple() {
+        // Pattern "AAA" matches forward in AAATTTCCC
+        let opts_fwd = MatcherOpts {
+            invert_match: false,
+            reverse_complement: false,
+        };
+        let opts_rc = MatcherOpts {
+            invert_match: false,
+            reverse_complement: true,
+        };
+        let matcher_fwd = FixedStringMatcher::new("AAA", opts_fwd);
+        let matcher_rc = FixedStringMatcher::new("AAA", opts_rc);
+
+        assert!(read_match_seq(&matcher_fwd, "AAATTTCCC"));
+        assert!(read_match_seq(&matcher_rc, "AAATTTCCC"));
+    }
+
+    #[test]
+    fn test_rc_match_only_in_rc() {
+        // Pattern "TTT" does NOT match forward in CCCGGGAAA, but DOES match the RC (TTTCCCGGG)
+        let opts_fwd = MatcherOpts {
+            invert_match: false,
+            reverse_complement: false,
+        };
+        let opts_rc = MatcherOpts {
+            invert_match: false,
+            reverse_complement: true,
+        };
+        let matcher_fwd = FixedStringMatcher::new("TTT", opts_fwd);
+        let matcher_rc = FixedStringMatcher::new("TTT", opts_rc);
+
+        assert!(!read_match_seq(&matcher_fwd, "CCCGGGAAA"));
+        assert!(read_match_seq(&matcher_rc, "CCCGGGAAA"));
+    }
+
+    #[test]
+    fn test_rc_match_at_end() {
+        // Pattern "AAA" does NOT match forward in CCCGGGTTT, but DOES match the RC (AAACCCGGG)
+        let opts_fwd = MatcherOpts {
+            invert_match: false,
+            reverse_complement: false,
+        };
+        let opts_rc = MatcherOpts {
+            invert_match: false,
+            reverse_complement: true,
+        };
+        let matcher_fwd = FixedStringMatcher::new("AAA", opts_fwd);
+        let matcher_rc = FixedStringMatcher::new("AAA", opts_rc);
+
+        assert!(!read_match_seq(&matcher_fwd, "CCCGGGTTT"));
+        assert!(read_match_seq(&matcher_rc, "CCCGGGTTT"));
+    }
+
+    #[test]
+    fn test_rc_match_palindrome() {
+        // ACGTACGTACGT is its own RC — pattern "ACGT" matches both forward and RC
+        let opts_fwd = MatcherOpts {
+            invert_match: false,
+            reverse_complement: false,
+        };
+        let opts_rc = MatcherOpts {
+            invert_match: false,
+            reverse_complement: true,
+        };
+        let matcher_fwd = FixedStringMatcher::new("ACGT", opts_fwd);
+        let matcher_rc = FixedStringMatcher::new("ACGT", opts_rc);
+
+        assert!(read_match_seq(&matcher_fwd, "ACGTACGTACGT"));
+        assert!(read_match_seq(&matcher_rc, "ACGTACGTACGT"));
+    }
+
+    #[test]
+    fn test_rc_match_single_base() {
+        // Pattern "T" does NOT match forward in AAAA, but DOES match the RC (TTTT)
+        let opts_fwd = MatcherOpts {
+            invert_match: false,
+            reverse_complement: false,
+        };
+        let opts_rc = MatcherOpts {
+            invert_match: false,
+            reverse_complement: true,
+        };
+        let matcher_fwd = FixedStringMatcher::new("T", opts_fwd);
+        let matcher_rc = FixedStringMatcher::new("T", opts_rc);
+
+        assert!(!read_match_seq(&matcher_fwd, "AAAA"));
+        assert!(read_match_seq(&matcher_rc, "AAAA"));
+    }
+
+    // ############################################################################################
+    // Property-based tests
+    // ############################################################################################
+
+    use proptest::prelude::*;
+
+    /// Strategy for generating valid DNA sequences
+    fn dna_sequence() -> impl Strategy<Value = Vec<u8>> {
+        prop::collection::vec(prop::sample::select(b"ACGT".to_vec()), 1..100)
+    }
+
+    /// Strategy for generating DNA patterns
+    fn dna_pattern() -> impl Strategy<Value = Vec<u8>> {
+        prop::collection::vec(prop::sample::select(b"ACGT".to_vec()), 1..20)
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(20))]
+
+        /// Property: Reverse complement is involutive - rc(rc(seq)) == seq
+        #[test]
+        fn prop_reverse_complement_involutive(seq in dna_sequence()) {
+            let rc = reverse_complement(&seq);
+            let rc_rc = reverse_complement(&rc);
+            prop_assert_eq!(seq, rc_rc);
+        }
+
+        /// Property: A sequence always matches itself as a fixed string
+        #[test]
+        fn prop_sequence_matches_itself(seq in dna_sequence()) {
+            let opts = MatcherOpts {
+                invert_match: false,
+                reverse_complement: false,
+            };
+            let matcher = FixedStringMatcher::new(
+                std::str::from_utf8(&seq).unwrap(),
+                opts
+            );
+            prop_assert!(matcher.bases_match(&seq));
+        }
+
+        /// Property: RC-enabled matching is a superset of forward-only matching.
+        #[test]
+        fn prop_rc_matching_consistent(seq in dna_sequence(), pattern in dna_pattern()) {
+            let opts_forward = MatcherOpts {
+                invert_match: false,
+                reverse_complement: false,
+            };
+            let opts_rc = MatcherOpts {
+                invert_match: false,
+                reverse_complement: true,
+            };
+
+            let pattern_str = std::str::from_utf8(&pattern).unwrap();
+            let seq_str = std::str::from_utf8(&seq).unwrap();
+            let matcher_forward = FixedStringMatcher::new(pattern_str, opts_forward);
+            let matcher_rc = FixedStringMatcher::new(pattern_str, opts_rc);
+
+            let matches_forward = read_match_seq(&matcher_forward, seq_str);
+            let matches_with_rc = read_match_seq(&matcher_rc, seq_str);
+
+            // If forward matches, RC-enabled must also match.
+            // The converse is not true (RC can match when forward doesn't).
+            prop_assert!(
+                !matches_forward || matches_with_rc,
+                "forward matched but RC-enabled did not"
+            );
+        }
+
+        /// Property: Invert match negates the result
+        #[test]
+        fn prop_invert_match_negates(seq in dna_sequence(), pattern in dna_pattern()) {
+            let opts_normal = MatcherOpts {
+                invert_match: false,
+                reverse_complement: false,
+            };
+            let opts_inverted = MatcherOpts {
+                invert_match: true,
+                reverse_complement: false,
+            };
+
+            let pattern_str = std::str::from_utf8(&pattern).unwrap();
+            let matcher_normal = FixedStringMatcher::new(pattern_str, opts_normal);
+            let matcher_inverted = FixedStringMatcher::new(pattern_str, opts_inverted);
+
+            let matches_normal = matcher_normal.bases_match(&seq);
+            let matches_inverted = matcher_inverted.bases_match(&seq);
+
+            prop_assert_ne!(matches_normal, matches_inverted);
+        }
+
+        /// Property: Fixed string matcher and regex matcher agree on literal patterns
+        #[test]
+        fn prop_fixed_and_regex_agree(seq in dna_sequence(), pattern in dna_pattern()) {
+            let opts = MatcherOpts {
+                invert_match: false,
+                reverse_complement: false,
+            };
+
+            let pattern_str = std::str::from_utf8(&pattern).unwrap();
+            let fixed_matcher = FixedStringMatcher::new(pattern_str, opts);
+
+            if let Ok(regex_matcher) = RegexMatcher::new(pattern_str, opts) {
+                let fixed_result = fixed_matcher.bases_match(&seq);
+                let regex_result = regex_matcher.bases_match(&seq);
+                prop_assert_eq!(fixed_result, regex_result,
+                    "Fixed and regex matchers disagree on pattern '{}' and sequence '{}'",
+                    pattern_str, std::str::from_utf8(&seq).unwrap()
+                );
+            }
+        }
+    }
 }
