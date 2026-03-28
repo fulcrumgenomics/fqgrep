@@ -1,3 +1,4 @@
+use ahash::AHashSet;
 use bitvec::prelude::*;
 use seq_io::fastq::RefRecord;
 use std::ops::Range;
@@ -121,7 +122,7 @@ fn bases_colored(
 /// Validates that a given FIXED pattern contains only valid DNA bases (ACGTN)
 pub fn validate_fixed_pattern(pattern: &str) -> Result<()> {
     for (index, base) in pattern.char_indices() {
-        if !DNA_BASES.contains(&(base as u8)) {
+        if !base.is_ascii() || !DNA_BASES.contains(&(base as u8)) {
             let next_index = index + base.len_utf8();
             bail!(
                 "Fixed pattern must contain only DNA bases: {} .. [{}] .. {}",
@@ -401,6 +402,46 @@ impl Matcher for RegexSetMatcher {
     }
 }
 
+/// Matcher for query names (read IDs).  Matches reads whose ID (the portion of the header before
+/// the first whitespace) exactly matches one of the query names in the provided set.
+pub struct QueryNameMatcher {
+    query_names: AHashSet<Vec<u8>>,
+    opts: MatcherOpts,
+}
+
+impl QueryNameMatcher {
+    pub fn new(query_names: AHashSet<Vec<u8>>, opts: MatcherOpts) -> Self {
+        Self { query_names, opts }
+    }
+}
+
+impl Matcher for QueryNameMatcher {
+    /// Not used — matching is by query name, not sequence. See `read_match()`.
+    #[inline]
+    fn bases_match(&self, _bases: &[u8]) -> bool {
+        !self.opts.invert_match
+    }
+
+    fn color_matched_bases(&self, bases: &[u8], quals: &[u8]) -> (Vec<u8>, Vec<u8>) {
+        (bases.to_vec(), quals.to_vec())
+    }
+
+    #[inline]
+    fn opts(&self) -> MatcherOpts {
+        self.opts
+    }
+
+    #[inline]
+    fn read_match(&self, read: &RefRecord) -> bool {
+        let id_match = self.query_names.contains(read.id_bytes());
+        if self.opts.invert_match {
+            !id_match
+        } else {
+            id_match
+        }
+    }
+}
+
 /// Factory for building a matcher
 pub struct MatcherFactory;
 
@@ -418,12 +459,21 @@ impl MatcherFactory {
             (false, None) => Box::new(RegexSetMatcher::new(regexp, match_opts)),
         }
     }
+
+    /// Create a matcher for query names (read IDs)
+    pub fn new_query_name_matcher(
+        query_names: AHashSet<Vec<u8>>,
+        match_opts: MatcherOpts,
+    ) -> Box<dyn Matcher + Sync + Send> {
+        Box::new(QueryNameMatcher::new(query_names, match_opts))
+    }
 }
 
 // Tests
 #[cfg(test)]
 pub mod tests {
     use crate::matcher::*;
+    use ahash::AHashSet;
     use rstest::rstest;
 
     // ############################################################################################
@@ -615,6 +665,56 @@ pub mod tests {
     }
 
     // ############################################################################################
+    // Tests QueryNameMatcher::read_match()
+    // ############################################################################################
+
+    #[rstest]
+    #[case(false, vec!["read1", "read2"], "read1", true)] // exact match found
+    #[case(false, vec!["read1", "read2"], "read3", false)] // no match
+    #[case(false, vec!["read1"], "read1_extra", false)] // partial match should fail (query name is a prefix of read ID)
+    #[case(false, vec!["read1_extra"], "read1", false)] // partial match should fail (read ID is a prefix of query name)
+    #[case(true, vec!["read1", "read2"], "read1", false)] // invert_match: found becomes false
+    #[case(true, vec!["read1", "read2"], "read3", true)] // invert_match: not found becomes true
+    fn test_query_name_matcher_read_match(
+        #[case] invert_match: bool,
+        #[case] query_names: Vec<&str>,
+        #[case] read_id: &str,
+        #[case] expected: bool,
+    ) {
+        let opts = MatcherOpts {
+            invert_match,
+            reverse_complement: false,
+        };
+        let names: AHashSet<Vec<u8>> = query_names.iter().map(|s| s.as_bytes().to_vec()).collect();
+        let matcher = QueryNameMatcher::new(names, opts);
+        let seq = "ACGT";
+        let qual = "XXXX";
+        let record = format!("@{read_id} description\n{seq}\n+\n{qual}\n");
+        let mut reader = seq_io::fastq::Reader::new(record.as_bytes());
+        let read_record = reader.next().unwrap().unwrap();
+        assert_eq!(matcher.read_match(&read_record), expected);
+    }
+
+    #[test]
+    fn test_query_name_matcher_with_header_description() {
+        // Tests that only the read ID (before first whitespace) is matched, not the full header
+        let opts = MatcherOpts {
+            invert_match: false,
+            reverse_complement: false,
+        };
+        let names: AHashSet<Vec<u8>> = vec!["SRR001666.1".as_bytes().to_vec()]
+            .into_iter()
+            .collect();
+        let matcher = QueryNameMatcher::new(names, opts);
+
+        // Record with description after read ID
+        let record = "@SRR001666.1 071112_SLXA description\nACGT\n+\nXXXX\n";
+        let mut reader = seq_io::fastq::Reader::new(record.as_bytes());
+        let read_record = reader.next().unwrap().unwrap();
+        assert!(matcher.read_match(&read_record));
+    }
+
+    // ############################################################################################
     // Tests validate_fixed_pattern()
     // ############################################################################################
 
@@ -631,5 +731,20 @@ pub mod tests {
         let result = validate_fixed_pattern(pattern);
         let inner = result.unwrap_err().to_string();
         assert_eq!(inner, msg);
+    }
+
+    #[test]
+    fn test_validate_fixed_pattern_rejects_non_ascii() {
+        // A non-ASCII character whose low byte happens to match 'A' (0x41)
+        // U+0141 (Latin capital letter L with stroke) has value 321, low byte = 0x41 = 'A'
+        let pattern = "AC\u{0141}T";
+        let result = validate_fixed_pattern(pattern);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Fixed pattern must contain only DNA bases")
+        );
     }
 }

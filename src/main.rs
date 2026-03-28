@@ -1,6 +1,7 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+use ahash::AHashSet;
 use anyhow::{Context, Result, bail, ensure};
 use clap::builder::styling;
 use clap::{ColorChoice, Parser as ClapParser, ValueEnum};
@@ -162,6 +163,13 @@ struct Opts {
     #[clap(long, short = 'f')]
     file: Option<PathBuf>,
 
+    /// Read one or more newline separated query names (read IDs) from file.  Records whose read
+    /// ID (the portion of the header before the first whitespace) exactly matches any query name
+    /// in the file will be selected.  This option is mutually exclusive with pattern matching
+    /// options (-e, -f, -F, and positional pattern).
+    #[clap(long = "read-names-file", short = 'N', conflicts_with_all = ["regexp", "file", "fixed_strings"])]
+    read_names_file: Option<PathBuf>,
+
     /// Selected lines are those not matching any of the specified patterns
     #[clap(short = 'v')]
     invert_match: bool,
@@ -207,6 +215,22 @@ fn read_patterns(file: &PathBuf) -> Result<Vec<String>> {
     Ok(v)
 }
 
+/// Reads query names (read IDs) from a file, one per line. Empty lines are skipped.
+fn read_query_names(file: &PathBuf) -> Result<AHashSet<Vec<u8>>> {
+    let f = File::open(file)
+        .with_context(|| format!("Error opening query names file: {}", file.display()))?;
+    let r = BufReader::new(f);
+    let mut names = AHashSet::new();
+    for result in r.lines() {
+        let line = result?;
+        let trimmed = line.trim();
+        if !trimmed.is_empty() {
+            names.insert(trimmed.as_bytes().to_vec());
+        }
+    }
+    Ok(names)
+}
+
 /// Runs fqgrep and converts Option<u8> to ExitCode
 ///
 /// Set the exit code:
@@ -250,28 +274,39 @@ fn fqgrep(opts: &Opts) -> Option<u8> {
 #[allow(clippy::too_many_lines)]
 fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
     let mut opts = opts.clone();
-    // Add patterns from a file if given
-    if let Some(file) = &opts.file {
-        for pattern in read_patterns(file)? {
-            opts.regexp.push(pattern);
+
+    let query_names: Option<AHashSet<Vec<u8>>> = if let Some(file) = &opts.read_names_file {
+        let names = read_query_names(file)?;
+        // Warn if --reverse-complement is used with query name matching
+        if opts.reverse_complement {
+            eprintln!(
+                "Warning: --reverse-complement is ignored when using query name matching (-N)"
+            );
         }
-    }
+        Some(names)
+    } else {
+        if let Some(file) = &opts.file {
+            for pattern in read_patterns(file)? {
+                opts.regexp.push(pattern);
+            }
+        }
+        None
+    };
 
     // Inspect the positional arguments to extract a fixed pattern
     let (pattern, mut files): (Option<String>, Vec<PathBuf>) = {
-        let (pattern, file_strings): (Option<String>, Vec<String>) = if opts.regexp.is_empty() {
-            // No patterns given by -e, so assume the first positional argument is the pattern and
-            // the rest are files
-            ensure!(
-                !opts.args.is_empty(),
-                "Pattern must be given with -e or as the first positional argument "
-            );
-            let files = opts.args.iter().skip(1).cloned().collect();
-            (Some(opts.args[0].clone()), files)
-        } else {
-            // Patterns given by -e, so assume all positional arguments are files
-            (None, opts.args.clone())
-        };
+        let (pattern, file_strings): (Option<String>, Vec<String>) =
+            if query_names.is_some() || opts.read_names_file.is_some() || !opts.regexp.is_empty() {
+                // Query name mode or patterns given by -e: all positional arguments are files
+                (None, opts.args.clone())
+            } else {
+                ensure!(
+                    !opts.args.is_empty(),
+                    "Pattern must be given with -e or as the first positional argument "
+                );
+                let files = opts.args.iter().skip(1).cloned().collect();
+                (Some(opts.args[0].clone()), files)
+            };
 
         // Convert file strings into paths
         let files = file_strings
@@ -294,7 +329,7 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
     }
 
     // Validate the fixed string pattern, if fixed-strings are specified
-    if opts.fixed_strings {
+    if query_names.is_none() && opts.fixed_strings {
         if let Some(pattern) = &pattern {
             validate_fixed_pattern(pattern)?;
         } else if !opts.regexp.is_empty() {
@@ -327,7 +362,8 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
         reverse_complement: opts.reverse_complement,
     };
 
-    let color = opts.color == Color::Always || (opts.color == Color::Auto && stdout_isatty());
+    let color = query_names.is_none()
+        && (opts.color == Color::Always || (opts.color == Color::Auto && stdout_isatty()));
 
     let mut maybe_writer: Option<Box<dyn Write>> = {
         if opts.count {
@@ -347,8 +383,11 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
     let mut num_matches = 0usize;
 
     // The matcher used in the primary search
-    let matcher: Box<dyn Matcher + Sync + Send> =
-        MatcherFactory::new_matcher(&pattern, opts.fixed_strings, &opts.regexp, match_opts);
+    let matcher: Box<dyn Matcher + Sync + Send> = if let Some(names) = query_names {
+        MatcherFactory::new_query_name_matcher(names, match_opts)
+    } else {
+        MatcherFactory::new_matcher(&pattern, opts.fixed_strings, &opts.regexp, match_opts)
+    };
 
     // The main loop
     // If no files, use "-" to signify standard input.
@@ -688,6 +727,7 @@ pub mod tests {
             regexp: pattern_string,
             fixed_strings: false,
             file: pattern_file,
+            read_names_file: None,
             invert_match: false,
             decompress: false,
             paired: false,
@@ -968,5 +1008,89 @@ pub mod tests {
         let mut opts = build_opts(&dir, &seqs, &pattern, true, None, String::from(".fq"));
         opts.fixed_strings = fixed_strings;
         assert_eq!(fqgrep(&opts), expected);
+    }
+
+    // ############################################################################################
+    // Tests query name matching with -N/--read-names-file
+    // ############################################################################################
+
+    #[rstest]
+    #[case(false, vec!["@0"], 1)] // match one read by name
+    #[case(false, vec!["@0", "@2"], 2)] // match two reads by name
+    #[case(false, vec!["@99"], 0)] // no match (name doesn't exist)
+    #[case(true, vec!["@0"], 3)] // invert: match all except read 0
+    #[case(true, vec!["@0", "@1", "@2", "@3"], 0)] // invert: match none (all names matched)
+    fn test_query_name_matching_unpaired(
+        #[case] invert_match: bool,
+        #[case] query_names: Vec<&str>,
+        #[case] expected: usize,
+    ) {
+        let dir = TempDir::new().unwrap();
+        // 4 reads with IDs 0, 1, 2, 3 (written by write_fastq)
+        let seqs = vec![vec!["AAAA", "TTTT", "GGGG", "CCCC"]];
+        let query_names: Vec<String> = query_names.iter().map(|s| s.to_string()).collect();
+        let query_names_path = write_pattern(&dir, &query_names);
+
+        let mut opts = build_opts(&dir, &seqs, &vec![], false, None, String::from(".fq"));
+        opts.read_names_file = Some(query_names_path);
+        opts.invert_match = invert_match;
+        opts.regexp = vec![];
+
+        let result = fqgrep_from_opts(&opts);
+        assert_eq!(result.unwrap(), expected);
+    }
+
+    #[rstest]
+    #[case(false, vec!["@0"], 1)] // match one pair where R1 has name "@0"
+    #[case(false, vec!["@0", "@1"], 2)] // match two pairs (each file has reads @0, @1)
+    #[case(true, vec!["@0", "@1"], 0)] // invert: no pairs match (all pairs have at least one matching name)
+    fn test_query_name_matching_paired(
+        #[case] invert_match: bool,
+        #[case] query_names: Vec<&str>,
+        #[case] expected: usize,
+    ) {
+        let dir = TempDir::new().unwrap();
+        // 2 pairs: (0,1) and (2,3)
+        let seqs = vec![vec!["AAAA", "TTTT"], vec!["GGGG", "CCCC"]];
+        let query_names: Vec<String> = query_names.iter().map(|s| s.to_string()).collect();
+        let query_names_path = write_pattern(&dir, &query_names);
+
+        let mut opts = build_opts(&dir, &seqs, &vec![], false, None, String::from(".fq"));
+        opts.read_names_file = Some(query_names_path);
+        opts.invert_match = invert_match;
+        opts.paired = true;
+        opts.regexp = vec![];
+
+        let result = fqgrep_from_opts(&opts);
+        assert_eq!(result.unwrap(), expected);
+    }
+
+    #[test]
+    fn test_query_name_matching_empty_file_returns_zero_matches() {
+        let dir = TempDir::new().unwrap();
+        let seqs = vec![vec!["AAAA", "TTTT"]];
+        let query_names_path = write_pattern(&dir, &vec![]);
+
+        let mut opts = build_opts(&dir, &seqs, &vec![], false, None, String::from(".fq"));
+        opts.read_names_file = Some(query_names_path);
+        opts.regexp = vec![];
+
+        let result = fqgrep_from_opts(&opts);
+        assert_eq!(result.unwrap(), 0);
+    }
+
+    #[test]
+    fn test_query_name_matching_empty_file_with_invert_returns_all() {
+        let dir = TempDir::new().unwrap();
+        let seqs = vec![vec!["AAAA", "TTTT"]];
+        let query_names_path = write_pattern(&dir, &vec![]);
+
+        let mut opts = build_opts(&dir, &seqs, &vec![], false, None, String::from(".fq"));
+        opts.read_names_file = Some(query_names_path);
+        opts.invert_match = true;
+        opts.regexp = vec![];
+
+        let result = fqgrep_from_opts(&opts);
+        assert_eq!(result.unwrap(), 2);
     }
 }

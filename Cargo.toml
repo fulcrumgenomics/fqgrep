@@ -25,6 +25,7 @@ path = "src/main.rs"
 lto = true
 
 [dependencies]
+ahash = "0.8"
 ansi_term = "0.12.1"
 anyhow = "1.0.97"
 bitvec = "1.0.1"
