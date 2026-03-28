@@ -1,4 +1,5 @@
 use ahash::AHashSet;
+use aho_corasick::AhoCorasick;
 use bitvec::prelude::*;
 use seq_io::fastq::RefRecord;
 use std::ops::Range;
@@ -58,7 +59,7 @@ fn bases_colored(
             // this base is to be colored
             if !last_color_on {
                 // add up to but not including this base to the colored vector **as uncolored**
-                if last_bases_index + 1 < cur_bases_index {
+                if last_bases_index < cur_bases_index {
                     COLOR_BACKGROUND
                         .paint(&bases[last_bases_index..cur_bases_index])
                         .write_to(&mut colored_bases)
@@ -77,7 +78,7 @@ fn bases_colored(
             // this base is not to be colored
             if last_color_on {
                 // add up to but not including this base to the colored vector **as colored**
-                if last_bases_index + 1 < cur_bases_index {
+                if last_bases_index < cur_bases_index {
                     COLOR_BASES
                         .paint(&bases[last_bases_index..cur_bases_index])
                         .write_to(&mut colored_bases)
@@ -95,7 +96,7 @@ fn bases_colored(
         cur_bases_index += 1;
     }
     // Color to the end
-    if last_bases_index + 1 < cur_bases_index {
+    if last_bases_index < cur_bases_index {
         if last_color_on {
             COLOR_BASES
                 .paint(&bases[last_bases_index..cur_bases_index])
@@ -236,16 +237,14 @@ impl FixedStringMatcher {
 /// Matcher for a set of fixed string patterns
 pub struct FixedStringSetMatcher {
     patterns: Vec<Vec<u8>>,
+    aho_corasick: AhoCorasick,
     opts: MatcherOpts,
 }
 
 impl Matcher for FixedStringSetMatcher {
     #[inline]
     fn bases_match(&self, bases: &[u8]) -> bool {
-        self.patterns
-            .iter()
-            .any(|pattern| bases.find(pattern).is_some())
-            != self.opts.invert_match
+        self.aho_corasick.is_match(bases) != self.opts.invert_match
     }
 
     fn color_matched_bases(&self, bases: &[u8], quals: &[u8]) -> (Vec<u8>, Vec<u8>) {
@@ -283,7 +282,7 @@ impl Matcher for FixedStringSetMatcher {
 }
 
 impl FixedStringSetMatcher {
-    pub fn new<I, S>(patterns: I, opts: MatcherOpts) -> Self
+    pub fn new<I, S>(patterns: I, opts: MatcherOpts) -> Result<Self>
     where
         S: AsRef<str>,
         I: IntoIterator<Item = S>,
@@ -292,7 +291,13 @@ impl FixedStringSetMatcher {
             .into_iter()
             .map(|pattern| pattern.as_ref().to_owned().as_bytes().to_vec())
             .collect();
-        Self { patterns, opts }
+        let aho_corasick =
+            AhoCorasick::new(&patterns).context("Failed to build Aho-Corasick automaton")?;
+        Ok(Self {
+            patterns,
+            aho_corasick,
+            opts,
+        })
     }
 }
 
@@ -303,12 +308,11 @@ pub struct RegexMatcher {
 }
 
 impl RegexMatcher {
-    pub fn new(pattern: &str, opts: MatcherOpts) -> Self {
+    pub fn new(pattern: &str, opts: MatcherOpts) -> Result<Self> {
         let regex = RegexBuilder::new(pattern)
             .build()
-            .context(format!("Invalid regular expression: {}", pattern))
-            .unwrap();
-        Self { regex, opts }
+            .with_context(|| format!("Invalid regular expression: '{}'", pattern))?;
+        Ok(Self { regex, opts })
     }
 }
 
@@ -350,7 +354,7 @@ pub struct RegexSetMatcher {
 
 /// Matcher for a set of regular expression patterns
 impl RegexSetMatcher {
-    pub fn new<I, S>(patterns: I, opts: MatcherOpts) -> Self
+    pub fn new<I, S>(patterns: I, opts: MatcherOpts) -> Result<Self>
     where
         S: AsRef<str>,
         I: IntoIterator<Item = S>,
@@ -362,16 +366,16 @@ impl RegexSetMatcher {
         let regex_set = RegexSetBuilder::new(string_patterns.clone())
             .dfa_size_limit(usize::MAX)
             .build()
-            .unwrap();
+            .context("Failed to build regex set from patterns")?;
         let regex_matchers: Vec<RegexMatcher> = string_patterns
             .into_iter()
             .map(|pattern| RegexMatcher::new(pattern.as_ref(), opts))
-            .collect();
-        Self {
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Self {
             regex_set,
             regex_matchers,
             opts,
-        }
+        })
     }
 }
 
@@ -458,12 +462,12 @@ impl MatcherFactory {
         fixed_strings: bool,
         regexp: &Vec<String>,
         match_opts: MatcherOpts,
-    ) -> Box<dyn Matcher + Sync + Send> {
+    ) -> Result<Box<dyn Matcher + Sync + Send>> {
         match (fixed_strings, &pattern) {
-            (true, Some(pattern)) => Box::new(FixedStringMatcher::new(pattern, match_opts)),
-            (false, Some(pattern)) => Box::new(RegexMatcher::new(pattern, match_opts)),
-            (true, None) => Box::new(FixedStringSetMatcher::new(regexp, match_opts)),
-            (false, None) => Box::new(RegexSetMatcher::new(regexp, match_opts)),
+            (true, Some(pattern)) => Ok(Box::new(FixedStringMatcher::new(pattern, match_opts))),
+            (false, Some(pattern)) => Ok(Box::new(RegexMatcher::new(pattern, match_opts)?)),
+            (true, None) => Ok(Box::new(FixedStringSetMatcher::new(regexp, match_opts)?)),
+            (false, None) => Ok(Box::new(RegexSetMatcher::new(regexp, match_opts)?)),
         }
     }
 
@@ -509,6 +513,64 @@ pub mod tests {
             .map(|(start, end)| std::ops::Range { start, end });
         let result_bitvec = to_bitvec(ranges, bases.len());
         assert_eq!(result_bitvec, expected);
+    }
+
+    // ############################################################################################
+    // Tests bases_colored() single-base boundary
+    // ############################################################################################
+
+    /// Regression test: a single-base match at the start, middle, and end of a sequence must be
+    /// colored.  Before the off-by-one fix (`last_bases_index + 1 < cur_bases_index` →
+    /// `last_bases_index < cur_bases_index`), single-base matches produced empty output.
+    #[test]
+    fn test_single_base_match_colored() {
+        let bases = b"ACGT";
+        let quals = b"IIII";
+
+        // Single-base match at position 0 ("A" in "ACGT")
+        let ranges_start = vec![Range { start: 0, end: 1 }];
+        let (colored_bases, _) = bases_colored(bases, quals, ranges_start.into_iter());
+        assert!(
+            !colored_bases.is_empty(),
+            "single-base match at start must produce colored output"
+        );
+
+        // Single-base match in the middle (position 2, "G" in "ACGT")
+        let ranges_mid = vec![Range { start: 2, end: 3 }];
+        let (colored_bases, _) = bases_colored(bases, quals, ranges_mid.into_iter());
+        assert!(
+            !colored_bases.is_empty(),
+            "single-base match in middle must produce colored output"
+        );
+
+        // Single-base match at the end (position 3, "T" in "ACGT")
+        let ranges_end = vec![Range { start: 3, end: 4 }];
+        let (colored_bases, _) = bases_colored(bases, quals, ranges_end.into_iter());
+        assert!(
+            !colored_bases.is_empty(),
+            "single-base match at end must produce colored output"
+        );
+
+        // Verify the colored output contains the actual base bytes (not just ANSI escapes)
+        // A single-base match ("G" at position 2 in "ACGT") should produce output containing
+        // all four bases with coloring applied
+        let ranges = vec![Range { start: 2, end: 3 }];
+        let (colored_bases, colored_quals) = bases_colored(bases, quals, ranges.into_iter());
+        let colored_str = String::from_utf8_lossy(&colored_bases);
+        let colored_qual_str = String::from_utf8_lossy(&colored_quals);
+        assert!(
+            colored_str.contains("AC"),
+            "uncolored prefix must be present"
+        );
+        assert!(colored_str.contains("G"), "colored base must be present");
+        assert!(
+            colored_str.contains("T"),
+            "uncolored suffix must be present"
+        );
+        assert!(
+            colored_qual_str.contains("II"),
+            "uncolored qual prefix must be present"
+        );
     }
 
     // ############################################################################################
@@ -577,7 +639,7 @@ pub mod tests {
                 invert_match,
                 reverse_complement,
             };
-            let matcher = FixedStringSetMatcher::new(patterns.iter(), opts);
+            let matcher = FixedStringSetMatcher::new(patterns.iter(), opts).unwrap();
             let qual = (0..seq.len()).map(|_| "X").collect::<String>();
             let record = format!("@id\n{seq}\n+\n{qual}\n");
             let mut reader = seq_io::fastq::Reader::new(record.as_bytes());
@@ -615,7 +677,7 @@ pub mod tests {
                 reverse_complement,
             };
 
-            let matcher = RegexMatcher::new(pattern, opts);
+            let matcher = RegexMatcher::new(pattern, opts).unwrap();
             let qual = (0..seq.len()).map(|_| "X").collect::<String>();
             let record = format!("@id\n{seq}\n+\n{qual}\n");
             let mut reader = seq_io::fastq::Reader::new(record.as_bytes());
@@ -657,7 +719,7 @@ pub mod tests {
                 reverse_complement,
             };
 
-            let matcher = RegexSetMatcher::new(patterns.iter(), opts);
+            let matcher = RegexSetMatcher::new(patterns.iter(), opts).unwrap();
             let qual = (0..seq.len()).map(|_| "X").collect::<String>();
             let record = format!("@id\n{seq}\n+\n{qual}\n");
             let mut reader = seq_io::fastq::Reader::new(record.as_bytes());

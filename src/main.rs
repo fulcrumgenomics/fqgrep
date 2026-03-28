@@ -55,14 +55,16 @@ pub mod built_info {
     pub static VERSION: LazyLock<String> = LazyLock::new(get_software_version);
 }
 
-fn spawn_reader(file: PathBuf, decompress: bool) -> fastq::Reader<Box<dyn std::io::Read + Send>> {
-    // Open the file or standad input
+fn spawn_reader(
+    file: PathBuf,
+    decompress: bool,
+) -> Result<fastq::Reader<Box<dyn std::io::Read + Send>>> {
+    // Open the file or standard input
     let raw_handle = if file.as_os_str() == "-" {
         Box::new(std::io::stdin()) as Box<dyn Read + Send>
     } else {
         let handle = File::open(&file)
-            .with_context(|| format!("Error opening input: {}", file.display()))
-            .unwrap();
+            .with_context(|| format!("Error opening input: {}", file.display()))?;
         Box::new(handle) as Box<dyn Read + Send>
     };
     // Wrap it in a buffer
@@ -78,7 +80,7 @@ fn spawn_reader(file: PathBuf, decompress: bool) -> fastq::Reader<Box<dyn std::i
         }
     };
     // Open a FASTQ reader
-    fastq::Reader::with_capacity(maybe_decoder_handle, BUFSIZE)
+    Ok(fastq::Reader::with_capacity(maybe_decoder_handle, BUFSIZE))
 }
 
 #[derive(ValueEnum, PartialEq, Debug, Clone)]
@@ -210,7 +212,8 @@ struct Opts {
 }
 
 fn read_patterns(file: &PathBuf) -> Result<Vec<String>> {
-    let f = File::open(file).expect("error in opening file");
+    let f = File::open(file)
+        .with_context(|| format!("Error opening pattern file: {}", file.display()))?;
     let r = BufReader::new(f);
     let mut v = Vec::new();
     for result in r.lines() {
@@ -390,7 +393,7 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
     let matcher: Box<dyn Matcher + Sync + Send> = if let Some(names) = query_names {
         MatcherFactory::new_query_name_matcher(names, match_opts)
     } else {
-        MatcherFactory::new_matcher(&pattern, opts.fixed_strings, &opts.regexp, match_opts)
+        MatcherFactory::new_matcher(&pattern, opts.fixed_strings, &opts.regexp, match_opts)?
     };
 
     // The main loop
@@ -408,7 +411,7 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
                 InterleavedFastqReader::new(spawn_reader(
                     files.first().unwrap().clone(),
                     opts.decompress,
-                )),
+                )?),
                 opts.threads as u32,
                 opts.threads,
                 |(read1, read2), found| {
@@ -465,9 +468,9 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
             // // Pairs of FASTQ files
             for file_pairs in files.chunks_exact(2) {
                 let reader1: fastq::Reader<Box<dyn Read + Send>> =
-                    spawn_reader(file_pairs[0].clone(), opts.decompress);
+                    spawn_reader(file_pairs[0].clone(), opts.decompress)?;
                 let reader2: fastq::Reader<Box<dyn Read + Send>> =
-                    spawn_reader(file_pairs[1].clone(), opts.decompress);
+                    spawn_reader(file_pairs[1].clone(), opts.decompress)?;
 
                 parallel_paired_fastq(
                     PairedFastqReader::new(reader1, reader2),
@@ -529,7 +532,7 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
         // Process one FASTQ at a time
         for file in files {
             let reader: fastq::Reader<Box<dyn Read + Send>> =
-                spawn_reader(file.clone(), opts.decompress);
+                spawn_reader(file.clone(), opts.decompress)?;
             parallel_fastq(
                 reader,
                 opts.threads as u32,
@@ -1061,7 +1064,7 @@ pub mod tests {
     // ############################################################################################
 
     #[rstest]
-    #[case(false, vec![String::from("*")], Some(101))] // invalid regex will panic - ExitCode(101)
+    #[case(false, vec![String::from("*")], Some(2))] // invalid regex returns error - ExitCode(2)
     #[case(false, vec![String::from("^T")], Some(1))] // zero matches - ExitCode(1)
     #[case(true, vec![String::from("GTCAGC")], None)] // one match - ExitCode(SUCCESS) None returned from fqgrep()
     #[case(true, vec![String::from("^T")], Some(2))] // returns inner error when regex is declared fixed_string - ExitCode(2)
