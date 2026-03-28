@@ -1,0 +1,94 @@
+name: Manage Release PRs and Publish Crate
+
+permissions:
+  pull-requests: write
+  contents: write
+
+on:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: release-plz-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_PLZ_TOKEN }}
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Create or update release PR
+        uses: release-plz/action@1528104d2ca23787631a1c1f022abb64b34c1e11 # v0.5
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_PLZ_TOKEN }}
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Publish crate
+        id: publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r \
+            '.packages[] | select(.name == "fqgrep") | .version')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+          PUBLISHED_VERSION=$(curl -sS \
+            -H "User-Agent: fqgrep-ci (https://github.com/fulcrumgenomics/fqgrep)" \
+            "https://crates.io/api/v1/crates/fqgrep" | jq -r \
+            '.crate.max_version // "0.0.0"')
+
+          if [ "$VERSION" = "$PUBLISHED_VERSION" ]; then
+            echo "fqgrep v$VERSION already on crates.io -- nothing to publish"
+            echo "published=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Publishing fqgrep v$VERSION..."
+          cargo publish
+          echo "published=true" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub release
+        if: steps.publish.outputs.published == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.publish.outputs.version }}"
+          TAG="v${VERSION}"
+
+          # Idempotent: skip if tag/release already exist (e.g. from a
+          # previous partial run that published crates but failed here).
+          if ! git rev-parse "$TAG" >/dev/null 2>&1; then
+            git tag "$TAG"
+          fi
+          if ! git ls-remote --tags origin "$TAG" | grep -q "$TAG"; then
+            git push origin "$TAG"
+          fi
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --title "v${VERSION}" \
+              --generate-notes \
+              --latest
+          else
+            echo "Release $TAG already exists -- skipping"
+          fi
