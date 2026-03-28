@@ -280,7 +280,6 @@ fn fqgrep(opts: &Opts) -> Option<u8> {
     }
 }
 
-#[allow(clippy::too_many_lines)]
 fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
     let mut opts = opts.clone();
 
@@ -293,12 +292,12 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
             );
         }
         Some(names)
-    } else {
-        if let Some(file) = &opts.file {
-            for pattern in read_patterns(file)? {
-                opts.regexp.push(pattern);
-            }
+    } else if let Some(file) = &opts.file {
+        for pattern in read_patterns(file)? {
+            opts.regexp.push(pattern);
         }
+        None
+    } else {
         None
     };
 
