@@ -1276,6 +1276,277 @@ pub mod tests {
     }
 
     // ############################################################################################
+    // Tests split paired output with interleaved input (single FASTQ, --paired)
+    // ############################################################################################
+    #[test]
+    fn test_paired_outputs_interleaved_input() {
+        let dir = TempDir::new().unwrap();
+
+        // Write a single interleaved FASTQ: R1_0, R2_0, R1_1, R2_1, R1_2, R2_2, R1_3, R2_3
+        // Pairs: (GGGG,GGGG) (AAAA,GGGA) (AGGG,CCCC) (TGCA,ACGT)
+        let r1_seqs = ["GGGG", "AAAA", "AGGG", "TGCA"];
+        let r2_seqs = ["GGGG", "GGGA", "CCCC", "ACGT"];
+        let interleaved_path = dir.path().join("interleaved.fq");
+        {
+            let io = Io::default();
+            let mut writer = io.new_writer(&interleaved_path).unwrap();
+            for i in 0..r1_seqs.len() {
+                let name = format!("@read{i}");
+                let r1 = OwnedRecord {
+                    head: name.as_bytes().to_vec(),
+                    seq: r1_seqs[i].as_bytes().to_vec(),
+                    qual: vec![b'X'; r1_seqs[i].len()],
+                };
+                fastq::write_to(&mut writer, &r1.head, &r1.seq, &r1.qual).unwrap();
+                let r2 = OwnedRecord {
+                    head: name.as_bytes().to_vec(),
+                    seq: r2_seqs[i].as_bytes().to_vec(),
+                    qual: vec![b'X'; r2_seqs[i].len()],
+                };
+                fastq::write_to(&mut writer, &r2.head, &r2.seq, &r2.qual).unwrap();
+            }
+        }
+
+        let r1_output = dir.path().join("out.r1.fq");
+        let r2_output = dir.path().join("out.r2.fq");
+        let opts = Opts {
+            threads: 4,
+            color: Color::Never,
+            count: false,
+            regexp: vec![String::from("GGG")],
+            fixed_strings: false,
+            file: None,
+            read_names_file: None,
+            invert_match: false,
+            decompress: false,
+            paired: true,
+            reverse_complement: false,
+            progress: false,
+            protein: false,
+            args: vec![interleaved_path.display().to_string()],
+            output: vec![r1_output.clone(), r2_output.clone()],
+        };
+
+        let result = fqgrep_from_opts(&opts);
+        assert_eq!(result.unwrap(), 3);
+
+        let r1_out_seqs: Vec<String> = slurp_fastq(&r1_output)
+            .iter()
+            .map(|r| String::from_utf8_lossy(r.seq()).to_string())
+            .collect();
+        assert_eq!(r1_out_seqs, vec!["GGGG", "AAAA", "AGGG"]);
+
+        let r2_out_seqs: Vec<String> = slurp_fastq(&r2_output)
+            .iter()
+            .map(|r| String::from_utf8_lossy(r.seq()).to_string())
+            .collect();
+        assert_eq!(r2_out_seqs, vec!["GGGG", "GGGA", "CCCC"]);
+    }
+
+    // ############################################################################################
+    // Tests split paired output with invert match
+    // ############################################################################################
+    #[test]
+    fn test_paired_outputs_invert_match() {
+        let dir = TempDir::new().unwrap();
+        // 3 pairs: (GGGG,GGGG) (AAAA,CCCC) (TGCA,ACGT)
+        // Pattern "GGG" — with invert, bases_match flips: selects reads WITHOUT "GGG"
+        // Pair 0: R1 GGGG has GGG (not selected), R2 GGGG has GGG (not selected) → Neither
+        // Pair 1: R1 AAAA lacks GGG (selected) → Read1
+        // Pair 2: R1 TGCA lacks GGG (selected) → Read1
+        // So 2 pairs match
+        let seqs = vec![
+            vec!["GGGG", "AAAA", "TGCA"],
+            vec!["GGGG", "CCCC", "ACGT"],
+        ];
+        let pattern = vec![String::from("GGG")];
+        let r1_output = dir.path().join("out.r1.fq");
+        let r2_output = dir.path().join("out.r2.fq");
+
+        let mut opts = build_opts(
+            &dir,
+            &seqs,
+            &pattern,
+            false,
+            vec![r1_output.clone(), r2_output.clone()],
+            String::from(".fq"),
+        );
+        opts.paired = true;
+        opts.count = false;
+        opts.invert_match = true;
+
+        let result = fqgrep_from_opts(&opts);
+        assert_eq!(result.unwrap(), 2);
+
+        let r1_out_seqs: Vec<String> = slurp_fastq(&r1_output)
+            .iter()
+            .map(|r| String::from_utf8_lossy(r.seq()).to_string())
+            .collect();
+        assert_eq!(r1_out_seqs, vec!["AAAA", "TGCA"]);
+
+        let r2_out_seqs: Vec<String> = slurp_fastq(&r2_output)
+            .iter()
+            .map(|r| String::from_utf8_lossy(r.seq()).to_string())
+            .collect();
+        assert_eq!(r2_out_seqs, vec!["CCCC", "ACGT"]);
+    }
+
+    // ############################################################################################
+    // Tests split paired output with reverse complement
+    // ############################################################################################
+    #[test]
+    fn test_paired_outputs_reverse_complement() {
+        let dir = TempDir::new().unwrap();
+        // Pattern "AAAA" with RC enabled also matches "TTTT"
+        // Pair 0: (AAAA, CCCC) — R1 matches directly
+        // Pair 1: (CCCC, TTTT) — R2 matches via RC (RC of TTTT = AAAA)
+        // Pair 2: (GGGG, CCCC) — neither matches
+        let seqs = vec![
+            vec!["AAAA", "CCCC", "GGGG"],
+            vec!["CCCC", "TTTT", "CCCC"],
+        ];
+        let pattern = vec![String::from("AAAA")];
+        let r1_output = dir.path().join("out.r1.fq");
+        let r2_output = dir.path().join("out.r2.fq");
+
+        let mut opts = build_opts(
+            &dir,
+            &seqs,
+            &pattern,
+            false,
+            vec![r1_output.clone(), r2_output.clone()],
+            String::from(".fq"),
+        );
+        opts.paired = true;
+        opts.count = false;
+        opts.reverse_complement = true;
+
+        let result = fqgrep_from_opts(&opts);
+        assert_eq!(result.unwrap(), 2);
+
+        let r1_out_seqs: Vec<String> = slurp_fastq(&r1_output)
+            .iter()
+            .map(|r| String::from_utf8_lossy(r.seq()).to_string())
+            .collect();
+        assert_eq!(r1_out_seqs, vec!["AAAA", "CCCC"]);
+
+        let r2_out_seqs: Vec<String> = slurp_fastq(&r2_output)
+            .iter()
+            .map(|r| String::from_utf8_lossy(r.seq()).to_string())
+            .collect();
+        assert_eq!(r2_out_seqs, vec!["CCCC", "TTTT"]);
+    }
+
+    // ############################################################################################
+    // Tests split paired output with color enabled
+    // ############################################################################################
+    #[test]
+    fn test_paired_outputs_with_color() {
+        let dir = TempDir::new().unwrap();
+        // Pair 0: (GGGG, CCCC) — R1 matches "GGG"
+        // Pair 1: (AAAA, GGGA) — R2 matches "GGG"
+        let seqs = vec![
+            vec!["GGGG", "AAAA"],
+            vec!["CCCC", "GGGA"],
+        ];
+        let pattern = vec![String::from("GGG")];
+        let r1_output = dir.path().join("out.r1.fq");
+        let r2_output = dir.path().join("out.r2.fq");
+
+        let mut opts = build_opts(
+            &dir,
+            &seqs,
+            &pattern,
+            false,
+            vec![r1_output.clone(), r2_output.clone()],
+            String::from(".fq"),
+        );
+        opts.paired = true;
+        opts.count = false;
+        opts.color = Color::Always;
+
+        let result = fqgrep_from_opts(&opts);
+        assert_eq!(result.unwrap(), 2);
+
+        // With color, sequences contain ANSI codes that break FASTQ parsing (seq/qual length
+        // mismatch), so count records by counting lines (each record is 4 lines).
+        let r1_lines = std::fs::read_to_string(&r1_output).unwrap();
+        let r2_lines = std::fs::read_to_string(&r2_output).unwrap();
+        let r1_line_count = r1_lines.lines().count();
+        let r2_line_count = r2_lines.lines().count();
+        assert_eq!(r1_line_count, 8, "R1 should have 2 records (8 lines)");
+        assert_eq!(r2_line_count, 8, "R2 should have 2 records (8 lines)");
+        // Verify ANSI escape codes are present in the output
+        assert!(r1_lines.contains("\x1b["), "R1 output should contain ANSI color codes");
+        assert!(r2_lines.contains("\x1b["), "R2 output should contain ANSI color codes");
+    }
+
+    // ############################################################################################
+    // Tests split paired output with no matches produces empty files
+    // ############################################################################################
+    #[test]
+    fn test_paired_outputs_no_matches() {
+        let dir = TempDir::new().unwrap();
+        let seqs = vec![
+            vec!["AAAA", "CCCC"],
+            vec!["TTTT", "GGGG"],
+        ];
+        let pattern = vec![String::from("ZZZZ")]; // matches nothing
+        let r1_output = dir.path().join("out.r1.fq");
+        let r2_output = dir.path().join("out.r2.fq");
+
+        let mut opts = build_opts(
+            &dir,
+            &seqs,
+            &pattern,
+            false,
+            vec![r1_output.clone(), r2_output.clone()],
+            String::from(".fq"),
+        );
+        opts.paired = true;
+        opts.count = false;
+
+        let result = fqgrep_from_opts(&opts);
+        assert_eq!(result.unwrap(), 0);
+
+        assert_eq!(slurp_fastq(&r1_output).len(), 0);
+        assert_eq!(slurp_fastq(&r2_output).len(), 0);
+    }
+
+    // ############################################################################################
+    // Tests count mode with two outputs (count is reported, no records written)
+    // ############################################################################################
+    #[test]
+    fn test_paired_outputs_count_mode() {
+        let dir = TempDir::new().unwrap();
+        let seqs = vec![
+            vec!["GGGG", "AAAA"],
+            vec!["GGGG", "CCCC"],
+        ];
+        let pattern = vec![String::from("GGG")];
+        let r1_output = dir.path().join("out.r1.fq");
+        let r2_output = dir.path().join("out.r2.fq");
+
+        let mut opts = build_opts(
+            &dir,
+            &seqs,
+            &pattern,
+            false,
+            vec![r1_output.clone(), r2_output.clone()],
+            String::from(".fq"),
+        );
+        opts.paired = true;
+        opts.count = true;
+
+        let result = fqgrep_from_opts(&opts);
+        assert_eq!(result.unwrap(), 1); // 1 pair matched
+
+        // In count mode, output files should not be created
+        assert!(!r1_output.exists());
+        assert!(!r2_output.exists());
+    }
+
+    // ############################################################################################
     // Tests output validation errors
     // ############################################################################################
     #[test]
