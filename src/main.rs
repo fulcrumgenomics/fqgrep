@@ -205,10 +205,12 @@ struct Opts {
     ///
     args: Vec<String>,
 
-    /// Hidden option to capture stdout for testing
-    ///
-    #[clap(long, hide_short_help = true, hide_long_help = true)]
-    output: Option<PathBuf>,
+    /// The output file(s).  When `--paired` is given with two output files, the first of pair
+    /// reads are written to the first output file and the second of pair reads are written to the
+    /// second output file.  Otherwise, a single output file may be given.  If no output file is
+    /// given, the output is written to standard output (with paired end records interleaved).
+    #[clap(long, short = 'o')]
+    output: Vec<PathBuf>,
 }
 
 fn read_patterns(file: &PathBuf) -> Result<Vec<String>> {
@@ -335,6 +337,21 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
         );
     }
 
+    // Validate output file count
+    let split_paired_output = opts.output.len() == 2;
+    if split_paired_output {
+        ensure!(
+            opts.paired,
+            "Two output files may only be given with --paired"
+        );
+    } else {
+        ensure!(
+            opts.output.len() <= 1,
+            "Expected 0 or 1 output files, got {}",
+            opts.output.len()
+        );
+    }
+
     // Validate the fixed string pattern, if fixed-strings are specified
     if query_names.is_none() && opts.fixed_strings {
         if let Some(pattern) = &pattern {
@@ -372,19 +389,32 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
     let color = query_names.is_none()
         && (opts.color == Color::Always || (opts.color == Color::Auto && stdout_isatty()));
 
-    let mut maybe_writer: Option<Box<dyn Write>> = {
+    #[allow(clippy::type_complexity)]
+    let (mut r1_writer, mut r2_writer): (Option<Box<dyn Write>>, Option<Box<dyn Write>>) = {
         if opts.count {
-            None
-        } else if let Some(file_path) = opts.output {
-            Some(Box::new(BufWriter::with_capacity(
+            (None, None)
+        } else if split_paired_output {
+            let w1 = Box::new(BufWriter::with_capacity(
+                BUFSIZE,
+                File::create(&opts.output[0]).unwrap(),
+            ));
+            let w2 = Box::new(BufWriter::with_capacity(
+                BUFSIZE,
+                File::create(&opts.output[1]).unwrap(),
+            ));
+            (Some(w1), Some(w2))
+        } else if let Some(file_path) = opts.output.first() {
+            let w = Box::new(BufWriter::with_capacity(
                 BUFSIZE,
                 File::create(file_path).unwrap(),
-            )))
+            ));
+            (Some(w), None)
         } else {
-            Some(Box::new(BufWriter::with_capacity(
+            let w = Box::new(BufWriter::with_capacity(
                 BUFSIZE,
                 std::io::stdout(),
-            )))
+            ));
+            (Some(w), None)
         }
     };
     let mut num_matches = 0usize;
@@ -415,57 +445,28 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
                 opts.threads as u32,
                 opts.threads,
                 |(read1, read2), found| {
-                    *found = process_paired_reads(&read1, &read2, &matcher, &progress_logger);
+                    *found = process_paired_reads(&read1, &read2, &*matcher, progress_logger.as_ref());
                 },
                 |(read1, read2), found| {
-                    if *found > 0 {
+                    if found.is_match() {
                         num_matches += 1;
-                        if let Some(writer) = &mut maybe_writer {
-                            if color {
-                                let found1 = *found == 1;
-                                let found2 = *found == 2 || matcher.read_match(&read2);
-                                let mut read1 = read1.to_owned_record();
-                                let mut read2 = read2.to_owned_record();
-                                matcher.color(&mut read1, found1);
-                                matcher.color(&mut read2, found2);
-                                fastq::write_to(
-                                    &mut *writer,
-                                    read1.head(),
-                                    read1.seq(),
-                                    read1.qual(),
-                                )
-                                .unwrap();
-                                fastq::write_to(
-                                    &mut *writer,
-                                    read2.head(),
-                                    read2.seq(),
-                                    read2.qual(),
-                                )
-                                .unwrap();
-                            } else {
-                                fastq::write_to(
-                                    &mut *writer,
-                                    read1.head(),
-                                    read1.seq(),
-                                    read1.qual(),
-                                )
-                                .unwrap();
-                                fastq::write_to(
-                                    &mut *writer,
-                                    read2.head(),
-                                    read2.seq(),
-                                    read2.qual(),
-                                )
-                                .unwrap();
-                            }
-                        }
+                        write_paired_record(
+                            &read1,
+                            &read2,
+                            found,
+                            color,
+                            &*matcher,
+                            &mut r1_writer,
+                            &mut r2_writer,
+                            split_paired_output,
+                        );
                     }
                     None::<()>
                 },
             )
             .unwrap();
         } else {
-            // // Pairs of FASTQ files
+            // Pairs of FASTQ files
             for file_pairs in files.chunks_exact(2) {
                 let reader1: fastq::Reader<Box<dyn Read + Send>> =
                     spawn_reader(file_pairs[0].clone(), opts.decompress)?;
@@ -477,50 +478,21 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
                     opts.threads as u32,
                     opts.threads,
                     |(read1, read2), found| {
-                        *found = process_paired_reads(&read1, &read2, &matcher, &progress_logger);
+                        *found = process_paired_reads(&read1, &read2, &*matcher, progress_logger.as_ref());
                     },
                     |(read1, read2), found| {
-                        if *found > 0 {
+                        if found.is_match() {
                             num_matches += 1;
-                            if let Some(writer) = &mut maybe_writer {
-                                if color {
-                                    let found1 = *found == 1;
-                                    let found2 = *found == 2 || matcher.read_match(&read2);
-                                    let mut read1 = read1.to_owned_record();
-                                    let mut read2 = read2.to_owned_record();
-                                    matcher.color(&mut read1, found1);
-                                    matcher.color(&mut read2, found2);
-                                    fastq::write_to(
-                                        &mut *writer,
-                                        read1.head(),
-                                        read1.seq(),
-                                        read1.qual(),
-                                    )
-                                    .unwrap();
-                                    fastq::write_to(
-                                        &mut *writer,
-                                        read2.head(),
-                                        read2.seq(),
-                                        read2.qual(),
-                                    )
-                                    .unwrap();
-                                } else {
-                                    fastq::write_to(
-                                        &mut *writer,
-                                        read1.head(),
-                                        read1.seq(),
-                                        read1.qual(),
-                                    )
-                                    .unwrap();
-                                    fastq::write_to(
-                                        &mut *writer,
-                                        read2.head(),
-                                        read2.seq(),
-                                        read2.qual(),
-                                    )
-                                    .unwrap();
-                                }
-                            }
+                            write_paired_record(
+                                &read1,
+                                &read2,
+                                found,
+                                color,
+                                &*matcher,
+                                &mut r1_writer,
+                                &mut r2_writer,
+                                split_paired_output,
+                            );
                         }
                         None::<()>
                     },
@@ -546,16 +518,8 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
                 |record, found| {
                     if *found {
                         num_matches += 1;
-                        if let Some(writer) = &mut maybe_writer {
-                            if color {
-                                let mut record = record.to_owned_record();
-                                matcher.color(&mut record, *found);
-                                fastq::write_to(writer, record.head(), record.seq(), record.qual())
-                                    .unwrap();
-                            } else {
-                                fastq::write_to(writer, record.head(), record.seq(), record.qual())
-                                    .unwrap();
-                            }
+                        if let Some(writer) = r1_writer.as_mut() {
+                            write_record(&record, &mut **writer, color, *found, &*matcher);
                         }
                     }
                     None::<()>
@@ -563,6 +527,13 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
             )
             .unwrap();
         }
+    }
+
+    if let Some(mut w) = r1_writer {
+        w.flush().expect("Error flushing R1 writer");
+    }
+    if let Some(mut w) = r2_writer {
+        w.flush().expect("Error flushing R2 writer");
     }
 
     if opts.count {
@@ -575,14 +546,97 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
     Ok(num_matches)
 }
 
-#[allow(clippy::ref_option)] // FIXME: remove me later and solve
-#[allow(clippy::borrowed_box)] // FIXME: remove me later and solve
+/// Writes a single FASTQ record to the given writer, optionally coloring matched bases.
+fn write_record(
+    record: &RefRecord,
+    writer: &mut dyn Write,
+    color: bool,
+    match_found: bool,
+    matcher: &(dyn Matcher + Sync + Send),
+) {
+    if color {
+        let mut owned = record.to_owned_record();
+        matcher.color(&mut owned, match_found);
+        fastq::write_to(writer, owned.head(), owned.seq(), owned.qual())
+            .expect("failed writing record");
+    } else {
+        fastq::write_to(writer, record.head(), record.seq(), record.qual())
+            .expect("failed writing record");
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+/// Writes a matched paired-end read pair to the output writer(s).
+///
+/// When `split_paired_output` is true, R1 goes to `r1_writer` and R2 goes to `r2_writer`.
+/// Otherwise, both R1 and R2 go to `r1_writer` (interleaved).
+///
+/// When `color` is true, the read that triggered the match is colored with match highlighting
+/// and the other read is colored with background highlighting.  When coloring, the second read
+/// is always re-matched to determine if it independently matches (for correct highlighting).
+fn write_paired_record(
+    read1: &RefRecord,
+    read2: &RefRecord,
+    pair_match: &PairMatch,
+    color: bool,
+    matcher: &(dyn Matcher + Sync + Send),
+    r1_writer: &mut Option<Box<dyn Write>>,
+    r2_writer: &mut Option<Box<dyn Write>>,
+    split_paired_output: bool,
+) {
+    let found1 = pair_match.read1_matched();
+    // When coloring, always re-check read2 so it gets colored correctly
+    let found2 = if color {
+        matches!(pair_match, PairMatch::Read2) || matcher.read_match(read2)
+    } else {
+        false // doesn't matter, not used without color
+    };
+
+    if let Some(w1) = r1_writer.as_mut() {
+        write_record(read1, &mut **w1, color, found1, matcher);
+    }
+
+    // For R2: use r2_writer if split, otherwise use r1_writer (interleaved)
+    let r2_dest = if split_paired_output {
+        r2_writer.as_mut()
+    } else {
+        r1_writer.as_mut()
+    };
+    if let Some(w2) = r2_dest {
+        write_record(read2, &mut **w2, color, found2, matcher);
+    }
+}
+
+/// The result of matching a paired-end read pair.
+#[derive(Default)]
+enum PairMatch {
+    /// Neither read matched.
+    #[default]
+    Neither,
+    /// Read 1 matched (and we didn't check read 2).
+    Read1,
+    /// Read 1 did not match, but read 2 matched.
+    Read2,
+}
+
+impl PairMatch {
+    /// Returns true if either read matched.
+    fn is_match(&self) -> bool {
+        !matches!(self, PairMatch::Neither)
+    }
+
+    /// Returns true if read 1 matched.
+    fn read1_matched(&self) -> bool {
+        matches!(self, PairMatch::Read1)
+    }
+}
+
 fn process_paired_reads(
     read1: &RefRecord,
     read2: &RefRecord,
-    matcher: &Box<dyn Matcher + Sync + Send>, //&(dyn Matcher + Sync + Send),
-    progress_logger: &Option<ProgLog>,
-) -> u32 {
+    matcher: &(dyn Matcher + Sync + Send),
+    progress_logger: Option<&ProgLog>,
+) -> PairMatch {
     if let Some(progress) = progress_logger {
         progress.record();
         progress.record();
@@ -596,11 +650,11 @@ fn process_paired_reads(
     );
     // NB: only search for a match in read2 if read1 does not have a match
     if matcher.read_match(read1) {
-        1
+        PairMatch::Read1
     } else if matcher.read_match(read2) {
-        2
+        PairMatch::Read2
     } else {
-        0
+        PairMatch::Neither
     }
 }
 
@@ -742,7 +796,7 @@ pub mod tests {
             progress: true,
             protein: false,
             args: fq_path.clone(),
-            output,
+            output: output.into_iter().collect(),
         }
     }
 
