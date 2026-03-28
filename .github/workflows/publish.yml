@@ -43,10 +43,10 @@ jobs:
             target: arm-unknown-linux-gnueabihf
             asset_name: fqgrep-arm-unknown-linux-gnueabihf
           - build: macos
-            os: macos-12
+            os: macos-latest
             rust: nightly
-            target: x86_64-apple-darwin
-            asset_name: fqgrep-x86_64-apple-darwin
+            target: aarch64-apple-darwin
+            asset_name: fqgrep-aarch64-apple-darwin
           - build: win-msvc
             os: windows-2022
             rust: nightly
@@ -65,16 +65,16 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
         with:
           toolchain: ${{ matrix.rust }}
           target: ${{ matrix.target }}
 
       - name: Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: ${{ matrix.job.os }}-${{ matrix.job.target }}
 
@@ -82,7 +82,7 @@ jobs:
         shell: bash
         if: ${{ matrix.use-cross == true }}
         run: |
-          cargo install cross
+          cargo install cross --locked
           echo "CARGO=cross" >> $GITHUB_ENV
       
       - name: Set target environment variables
@@ -126,7 +126,7 @@ jobs:
           fi
 
       - name: Upload binaries to release
-        uses: svenstaro/upload-release-action@v2
+        uses: svenstaro/upload-release-action@29e53e917877a24fad85510ded594ab3c9ca12de # v2
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
           file: fqgrep-${{ matrix.target }}
