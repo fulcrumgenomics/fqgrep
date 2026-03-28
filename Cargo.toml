@@ -29,6 +29,7 @@ ahash = "0.8"
 aho-corasick = "1.1"
 ansi_term = "0.12.1"
 anyhow = "1.0.97"
+bio = "3.0.0"
 bitvec = "1.0.1"
 bstr = "0.2.17"
 clap = { version = "4.5.31", features = ["derive", "unstable-markdown"] }

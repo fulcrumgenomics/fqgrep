@@ -3,6 +3,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use ahash::AHashSet;
 use anyhow::{Context, Result, bail, ensure};
+use bio::data_structures::bitenc::BitEnc;
 use clap::builder::styling;
 use clap::{ColorChoice, Parser as ClapParser, ValueEnum};
 use env_logger::Env;
@@ -88,6 +89,16 @@ enum Color {
     Never,
     Always,
     Auto,
+}
+
+/// Strategy for handling IUPAC ambiguity codes in fixed-string patterns.
+#[derive(ValueEnum, PartialEq, Debug, Clone, Default)]
+enum IupacOption {
+    #[default]
+    Never,
+    Expand,
+    Regex,
+    BitMask,
 }
 
 /// The style for the usage
@@ -199,6 +210,18 @@ struct Opts {
     #[clap(long, conflicts_with = "reverse_complement")]
     protein: bool,
 
+    /// Determine if IUPAC codes should be treated specially when `-F/--fixed-strings` is
+    /// specified.  If `Never` is given, patterns are left as-is.  If `Expand` is given, then
+    /// the pattern (or patterns) will be replaced with fixed strings without IUPAC codes, for
+    /// example, `GATK` will be expanded to two fixed patterns `GATG` and `GATT`.  If `Regex` is
+    /// given, then the pattern (or patterns) will be replaced with regular expressions without
+    /// IUPAC codes, for example, `GATK` will be changed to the regular expression `GAT[GT]`.
+    /// If `BitMask` is given, then the pattern (or patterns) will be matched using a 4-bit
+    /// bitmask encoding where each IUPAC code is represented as the bitwise OR of its
+    /// constituent bases (A=1, C=2, G=4, T=8).
+    #[clap(long, default_value = "never", conflicts_with = "protein")]
+    iupac: IupacOption,
+
     /// The first argument is the pattern to match, with the remaining arguments containing the
     /// files to match.  If `-e` is given, then all the arguments are files to match.
     /// Use standard input if either no files are given or `-` is given.
@@ -278,6 +301,67 @@ fn fqgrep(opts: &Opts) -> Option<u8> {
     }
 }
 
+/// Expands IUPAC codes in patterns based on the chosen mode.
+/// Returns `Some(bitencs)` for BitMask mode, `None` for Expand/Regex/Never.
+fn expand_iupac(
+    pattern: &mut Option<String>,
+    regexp: &mut Vec<String>,
+    fixed_strings: &mut bool,
+    iupac: &IupacOption,
+) -> Result<Option<Vec<BitEnc>>> {
+    use fqgrep_lib::{encode, expand_iupac_fixed_pattern, expand_iupac_regex};
+
+    if *iupac == IupacOption::Never {
+        return Ok(None);
+    }
+
+    if !*fixed_strings {
+        eprintln!("Warning: --iupac is ignored without --fixed-strings (-F)");
+        return Ok(None);
+    }
+
+    let patterns: Vec<String> = if let Some(p) = pattern.take() {
+        vec![p]
+    } else {
+        std::mem::take(regexp)
+    };
+
+    match iupac {
+        IupacOption::Expand => {
+            let mut expanded = Vec::new();
+            for p in &patterns {
+                let mut local = Vec::new();
+                expand_iupac_fixed_pattern(p.as_bytes(), 0, &mut Vec::new(), &mut local)
+                    .map_err(|e| anyhow::anyhow!(e))?;
+                for e in local {
+                    expanded.push(String::from_utf8(e).unwrap());
+                }
+            }
+            *regexp = expanded;
+            Ok(None)
+        }
+        IupacOption::Regex => {
+            let mut expanded = Vec::new();
+            for p in &patterns {
+                expanded.push(String::from_utf8(expand_iupac_regex(p.as_bytes())).unwrap());
+            }
+            *regexp = expanded;
+            *fixed_strings = false;
+            Ok(None)
+        }
+        IupacOption::BitMask => {
+            let bitencs: Vec<BitEnc> = patterns.iter().map(|p| encode(p.as_bytes())).collect();
+            if bitencs.len() == 1 {
+                *pattern = Some(patterns.into_iter().next().unwrap());
+            } else {
+                *regexp = patterns;
+            }
+            Ok(Some(bitencs))
+        }
+        IupacOption::Never => unreachable!(),
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
     let mut opts = opts.clone();
@@ -301,7 +385,7 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
     };
 
     // Inspect the positional arguments to extract a fixed pattern
-    let (pattern, mut files): (Option<String>, Vec<PathBuf>) = {
+    let (mut pattern, mut files): (Option<String>, Vec<PathBuf>) = {
         let (pattern, file_strings): (Option<String>, Vec<String>) =
             if query_names.is_some() || opts.read_names_file.is_some() || !opts.regexp.is_empty() {
                 // Query name mode or patterns given by -e: all positional arguments are files
@@ -327,6 +411,14 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
         (pattern, files)
     };
 
+    // Expand IUPAC codes if needed
+    let bitencs = expand_iupac(
+        &mut pattern,
+        &mut opts.regexp,
+        &mut opts.fixed_strings,
+        &opts.iupac,
+    )?;
+
     // Ensure that if multiple files are given, its a multiple of two.
     if opts.paired {
         ensure!(
@@ -336,7 +428,8 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
     }
 
     // Validate the fixed string pattern, if fixed-strings are specified
-    if query_names.is_none() && opts.fixed_strings {
+    // Skip validation when using bitmask mode (patterns contain IUPAC codes by design)
+    if query_names.is_none() && opts.fixed_strings && bitencs.is_none() {
         if let Some(pattern) = &pattern {
             validate_fixed_pattern(pattern, opts.protein)?;
         } else if !opts.regexp.is_empty() {
@@ -393,7 +486,13 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
     let matcher: Box<dyn Matcher + Sync + Send> = if let Some(names) = query_names {
         MatcherFactory::new_query_name_matcher(names, match_opts)
     } else {
-        MatcherFactory::new_matcher(&pattern, opts.fixed_strings, &opts.regexp, match_opts)?
+        MatcherFactory::new_matcher(
+            &pattern,
+            opts.fixed_strings,
+            &opts.regexp,
+            bitencs,
+            match_opts,
+        )?
     };
 
     // The main loop
@@ -741,6 +840,7 @@ pub mod tests {
             reverse_complement: false,
             progress: true,
             protein: false,
+            iupac: IupacOption::Never,
             args: fq_path.clone(),
             output,
         }
@@ -1162,5 +1262,90 @@ pub mod tests {
 
         let result = fqgrep_from_opts(&opts);
         assert_eq!(result.unwrap(), 2);
+    }
+
+    // ############################################################################################
+    // Tests IUPAC matching modes (Expand, Regex, BitMask)
+    // ############################################################################################
+
+    #[rstest]
+    #[case(IupacOption::Expand)]
+    #[case(IupacOption::Regex)]
+    #[case(IupacOption::BitMask)]
+    fn test_iupac_modes_single_pattern(#[case] iupac_mode: IupacOption) {
+        let dir = TempDir::new().unwrap();
+        let seqs = vec![vec!["GATG", "GATT", "GATA", "GATC"]];
+        let pattern = vec![String::from("GATK")];
+        let mut opts = build_opts(&dir, &seqs, &pattern, false, None, String::from(".fq"));
+        opts.fixed_strings = true;
+        opts.iupac = iupac_mode;
+        let result = fqgrep_from_opts(&opts);
+        assert_eq!(result.unwrap(), 2, "GATK should match GATG and GATT");
+    }
+
+    #[rstest]
+    #[case(IupacOption::Expand)]
+    #[case(IupacOption::Regex)]
+    #[case(IupacOption::BitMask)]
+    fn test_iupac_modes_multiple_patterns(#[case] iupac_mode: IupacOption) {
+        let dir = TempDir::new().unwrap();
+        let seqs = vec![vec!["GATG", "ACCA", "TTTT", "CCCC"]];
+        let pattern = vec![String::from("GATK"), String::from("ACS")];
+        let mut opts = build_opts(&dir, &seqs, &pattern, false, None, String::from(".fq"));
+        opts.fixed_strings = true;
+        opts.iupac = iupac_mode;
+        let result = fqgrep_from_opts(&opts);
+        assert_eq!(result.unwrap(), 2, "GATK matches GATG, ACS matches ACCA");
+    }
+
+    #[rstest]
+    #[case(IupacOption::Expand)]
+    #[case(IupacOption::Regex)]
+    #[case(IupacOption::BitMask)]
+    fn test_iupac_modes_invert_match(#[case] iupac_mode: IupacOption) {
+        let dir = TempDir::new().unwrap();
+        let seqs = vec![vec!["GATG", "GATT", "GATA", "GATC"]];
+        let pattern = vec![String::from("GATK")];
+        let mut opts = build_opts(&dir, &seqs, &pattern, false, None, String::from(".fq"));
+        opts.fixed_strings = true;
+        opts.iupac = iupac_mode;
+        opts.invert_match = true;
+        let result = fqgrep_from_opts(&opts);
+        assert_eq!(
+            result.unwrap(),
+            2,
+            "invert: GATA and GATC should not match GATK"
+        );
+    }
+
+    #[rstest]
+    #[case(IupacOption::Expand)]
+    #[case(IupacOption::Regex)]
+    #[case(IupacOption::BitMask)]
+    fn test_iupac_modes_n_wildcard(#[case] iupac_mode: IupacOption) {
+        let dir = TempDir::new().unwrap();
+        let seqs = vec![vec!["AAAT", "ACGT", "TTTT"]];
+        let pattern = vec![String::from("AN")];
+        let mut opts = build_opts(&dir, &seqs, &pattern, false, None, String::from(".fq"));
+        opts.fixed_strings = true;
+        opts.iupac = iupac_mode;
+        let result = fqgrep_from_opts(&opts);
+        assert_eq!(result.unwrap(), 2, "AN should match AAAT and ACGT");
+    }
+
+    #[rstest]
+    fn test_iupac_expand_exceeds_limit_returns_error() {
+        let dir = TempDir::new().unwrap();
+        let seqs = vec![vec!["ACGT"]];
+        // 8 Ns = 4^8 = 65536 expansions, which exceeds MAX_IUPAC_EXPANSIONS
+        let pattern = vec![String::from("NNNNNNNN")];
+        let mut opts = build_opts(&dir, &seqs, &pattern, false, None, String::from(".fq"));
+        opts.fixed_strings = true;
+        opts.iupac = IupacOption::Expand;
+        let result = fqgrep_from_opts(&opts);
+        assert!(
+            result.is_err(),
+            "Should return error for excessive IUPAC expansion"
+        );
     }
 }

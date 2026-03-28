@@ -130,6 +130,12 @@ Options:
       --protein
           The input files contain protein sequences (amino acids), not DNA sequences
 
+      --iupac <IUPAC>
+          Determine if IUPAC codes should be treated specially when -F/--fixed-strings is specified.  If Never is given, patterns are left as-is.  If Expand is given, then the pattern (or patterns) will be replaced with fixed strings without IUPAC codes, for example, GATK will be expanded to two fixed patterns GATG and GATT.  If Regex is given, then the pattern (or patterns) will be replaced with regular expressions without IUPAC codes, for example, GATK will be changed to the regular expression GAT[GT]. If BitMask is given, then the pattern (or patterns) will be matched using a 4-bit bitmask encoding where each IUPAC code is represented as the bitwise OR of its constituent bases (A=1, C=2, G=4, T=8)
+          
+          [default: never]
+          [possible values: never, expand, regex, bit-mask]
+
   -h, --help
           Print help (see a summary with '-h')
 
