@@ -21,7 +21,6 @@ use proglog::{CountFormatterKind, ProgLog, ProgLogBuilder};
 use seq_io::fastq::{self, Record, RefRecord};
 use seq_io::parallel::parallel_fastq;
 use std::process::ExitCode;
-use zstd::stream::read::Decoder as ZstdDecoder;
 use std::{
     fs::File,
     io::{BufRead, BufReader, BufWriter, Read, Write},
@@ -29,6 +28,7 @@ use std::{
     str::FromStr,
     sync::LazyLock,
 };
+use zstd::stream::read::Decoder as ZstdDecoder;
 
 /// The number of cpus as a String
 pub static NUM_CPU: LazyLock<String> = LazyLock::new(|| num_cpus::get().to_string());
@@ -126,7 +126,7 @@ const STYLES: styling::Styles = styling::Styles::styled()
 /// If the input files are real files and end with `.gz` or `.bgz`, they are assumed to be GZIP
 /// compressed, or (2) if they end with `.zst` or `.zstd`, they are assumed to be zstandard
 /// compressed, or (3) if they end with `.fastq` or `.fq`, they are assumed to be uncompressed, or
-/// (4) if the `-Z/--decompress` option is specified then any unrecongized inputs (including
+/// (4) if the `-Z/--decompress` option is specified then any unrecognized inputs (including
 /// standard input) are assumed to be GZIP compressed.
 ///
 /// # THREADS

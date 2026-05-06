@@ -69,7 +69,7 @@ The fqgrep utility searches any given input FASTQ files, selecting records whose
 
 INPUT COMPRESSION
 
-By default, the input files are assumed to be uncompressed with the following exceptions: (1) If the input files are real files and end with .gz or .bgz, they are assumed to be GZIP compressed, or (2) if they end with .zst or .zstd, they are assumed to be zstandard compressed, or (3) if they end with .fastq or .fq, they are assumed to be uncompressed, or (4) if the -Z/--decompress option is specified then any unrecongized inputs (including standard input) are assumed to be GZIP compressed.
+By default, the input files are assumed to be uncompressed with the following exceptions: (1) If the input files are real files and end with .gz or .bgz, they are assumed to be GZIP compressed, or (2) if they end with .zst or .zstd, they are assumed to be zstandard compressed, or (3) if they end with .fastq or .fq, they are assumed to be uncompressed, or (4) if the -Z/--decompress option is specified then any unrecognized inputs (including standard input) are assumed to be GZIP compressed.
 
 THREADS
 
