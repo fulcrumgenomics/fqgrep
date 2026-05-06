@@ -50,6 +50,7 @@ regex = {version = "1.11.1", default-features = false, features = ["perf", "perf
 seq_io = "0.3.4"
 
 serde = {version = "1.0.218", features = ["derive"]}
+zstd = "0.13"
 
 [build-dependencies]
 built = {version ="0.5.2", features = ["git2"]}

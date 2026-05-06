@@ -14,13 +14,14 @@ use fqgrep_lib::seq_io::{
     ordered_parallel_interleaved_fastq, ordered_parallel_paired_fastq, parallel_interleaved_fastq,
     parallel_paired_fastq,
 };
-use fqgrep_lib::{is_fastq_path, is_gzip_path};
+use fqgrep_lib::{is_fastq_path, is_gzip_path, is_zstd_path};
 use gzp::BUFSIZE;
 use isatty::stdout_isatty;
 use proglog::{CountFormatterKind, ProgLog, ProgLogBuilder};
 use seq_io::fastq::{self, Record, RefRecord};
 use seq_io::parallel::parallel_fastq;
 use std::process::ExitCode;
+use zstd::stream::read::Decoder as ZstdDecoder;
 use std::{
     fs::File,
     io::{BufRead, BufReader, BufWriter, Read, Write},
@@ -74,13 +75,14 @@ fn spawn_reader(
     let buf_handle: BufReader<Box<dyn std::io::Read + Send>> =
         BufReader::with_capacity(BUFSIZE, raw_handle);
     // Maybe wrap it in a decompressor
-    let maybe_decoder_handle: Box<dyn std::io::Read + Send> = {
-        let is_gzip = is_gzip_path(&file) || (!is_fastq_path(&file) && decompress);
-        if is_gzip {
-            Box::new(MultiGzDecoder::new(buf_handle)) as Box<dyn std::io::Read + Send>
-        } else {
-            Box::new(buf_handle) as Box<dyn std::io::Read + Send>
-        }
+    let maybe_decoder_handle: Box<dyn std::io::Read + Send> = if is_zstd_path(&file) {
+        let decoder = ZstdDecoder::with_buffer(buf_handle)
+            .with_context(|| format!("Error opening zstd input: {}", file.display()))?;
+        Box::new(decoder) as Box<dyn std::io::Read + Send>
+    } else if is_gzip_path(&file) || (!is_fastq_path(&file) && decompress) {
+        Box::new(MultiGzDecoder::new(buf_handle)) as Box<dyn std::io::Read + Send>
+    } else {
+        Box::new(buf_handle) as Box<dyn std::io::Read + Send>
     };
     // Open a FASTQ reader
     Ok(fastq::Reader::with_capacity(maybe_decoder_handle, BUFSIZE))
@@ -122,8 +124,9 @@ const STYLES: styling::Styles = styling::Styles::styled()
 ///
 /// By default, the input files are assumed to be uncompressed with the following exceptions: (1)
 /// If the input files are real files and end with `.gz` or `.bgz`, they are assumed to be GZIP
-/// compressed, or (2) if they end with `.fastq` or `.fq`, they are assumed to be uncompressed, or
-/// (3) if the `-Z/--decompress` option is specified then any unrecongized inputs (including
+/// compressed, or (2) if they end with `.zst` or `.zstd`, they are assumed to be zstandard
+/// compressed, or (3) if they end with `.fastq` or `.fq`, they are assumed to be uncompressed, or
+/// (4) if the `-Z/--decompress` option is specified then any unrecongized inputs (including
 /// standard input) are assumed to be GZIP compressed.
 ///
 /// # THREADS
@@ -775,6 +778,7 @@ pub mod tests {
     use rstest::rstest;
     use seq_io::fastq::{OwnedRecord, Record};
     use tempfile::TempDir;
+    use zstd::stream::write::Encoder as ZstdEncoder;
 
     /// Returns the path(s)  of type `Vec<String>` to the fastq(s) written from the provided sequence
     ///
@@ -799,8 +803,16 @@ pub mod tests {
         for (fastq_index, fastq_sequences) in sequences_per_fastq.iter().enumerate() {
             let name = format!("sample_{fastq_index}{file_extension}");
             let fastq_path = temp_dir.path().join(name);
-            let io = Io::default();
-            let mut writer = io.new_writer(&fastq_path).unwrap();
+
+            // fgoxide's writer handles `.gz`/`.bgz` but not zstd, so wrap manually for `.zst`.
+            let mut writer: Box<dyn Write> = if is_zstd_path(&fastq_path) {
+                let file = File::create(&fastq_path).unwrap();
+                let encoder = ZstdEncoder::new(file, 0).unwrap().auto_finish();
+                Box::new(BufWriter::new(encoder))
+            } else {
+                let io = Io::default();
+                Box::new(io.new_writer(&fastq_path).unwrap())
+            };
 
             // Second loop through &str in &Vec<Vec<&str>>
             for (num, seq) in fastq_sequences.iter().enumerate() {
@@ -1105,7 +1117,9 @@ pub mod tests {
     fn slurp_fastq(path: &PathBuf) -> Vec<OwnedRecord> {
         let handle = File::open(path).unwrap();
         let buf_handle = BufReader::with_capacity(BUFSIZE, handle);
-        let maybe_decoder_handle: Box<dyn Read> = if is_gzip_path(path) {
+        let maybe_decoder_handle: Box<dyn Read> = if is_zstd_path(path) {
+            Box::new(ZstdDecoder::with_buffer(buf_handle).unwrap())
+        } else if is_gzip_path(path) {
             Box::new(MultiGzDecoder::new(buf_handle))
         } else {
             Box::new(buf_handle)
@@ -1273,7 +1287,7 @@ pub mod tests {
     }
 
     // ############################################################################################
-    // Tests that correct match count is returned from .fq, .fastq, .fq.gz, and .fq.bgz
+    // Tests that correct match count is returned from .fq, .fastq, .fq.gz, .fq.bgz, and .fq.zst
     // ############################################################################################
     // Three matches are found from all file types
     #[rstest]
@@ -1281,6 +1295,8 @@ pub mod tests {
     #[case(String::from(".fastq"), 3)]
     #[case(String::from(".fq.gz"), 3)]
     #[case(String::from(".fq.bgz"), 3)]
+    #[case(String::from(".fq.zst"), 3)]
+    #[case(String::from(".fq.zstd"), 3)]
     fn test_fastq_compression(#[case] extension: String, #[case] expected: usize) {
         let dir = TempDir::new().unwrap();
         let seqs = vec![
