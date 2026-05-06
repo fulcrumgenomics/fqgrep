@@ -807,7 +807,9 @@ pub mod tests {
             // fgoxide's writer handles `.gz`/`.bgz` but not zstd, so wrap manually for `.zst`.
             let mut writer: Box<dyn Write> = if is_zstd_path(&fastq_path) {
                 let file = File::create(&fastq_path).unwrap();
-                let encoder = ZstdEncoder::new(file, 0).unwrap().auto_finish();
+                let encoder = ZstdEncoder::new(file, zstd::DEFAULT_COMPRESSION_LEVEL)
+                    .unwrap()
+                    .auto_finish();
                 Box::new(BufWriter::new(encoder))
             } else {
                 let io = Io::default();
