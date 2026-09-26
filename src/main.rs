@@ -17,6 +17,7 @@ use fqgrep_lib::seq_io::{
 use fqgrep_lib::{is_fastq_path, is_gzip_path};
 use gzp::BUFSIZE;
 use isatty::stdout_isatty;
+use itertools::Itertools;
 use proglog::{CountFormatterKind, ProgLog, ProgLogBuilder};
 use seq_io::fastq::{self, Record, RefRecord};
 use seq_io::parallel::parallel_fastq;
@@ -588,11 +589,11 @@ fn fqgrep_from_opts(opts: &Opts) -> Result<usize> {
             }
         } else {
             // // Pairs of FASTQ files
-            for file_pairs in files.chunks_exact(2) {
+            for (file1, file2) in files.iter().tuples() {
                 let reader1: fastq::Reader<Box<dyn Read + Send>> =
-                    spawn_reader(file_pairs[0].clone(), opts.decompress)?;
+                    spawn_reader(file1.clone(), opts.decompress)?;
                 let reader2: fastq::Reader<Box<dyn Read + Send>> =
-                    spawn_reader(file_pairs[1].clone(), opts.decompress)?;
+                    spawn_reader(file2.clone(), opts.decompress)?;
                 let reader = PairedFastqReader::new(reader1, reader2);
                 let work = |(read1, read2): (RefRecord, RefRecord), found: &mut u32| {
                     *found = process_paired_reads(&read1, &read2, &matcher, &progress_logger);
