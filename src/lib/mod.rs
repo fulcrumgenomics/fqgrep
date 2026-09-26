@@ -154,8 +154,8 @@ where
         .collect()
 }
 
-/// Returns true if the path ends with a recognized GZIP file extension
-fn is_path_with_extension<P: AsRef<Path>>(p: &P, extensions: [&str; 2]) -> bool {
+/// Returns true if the path ends with one of the given extensions
+fn is_path_with_extension<P: AsRef<Path>>(p: &P, extensions: &[&str]) -> bool {
     if let Some(ext) = p.as_ref().extension() {
         match ext.to_str() {
             Some(x) => extensions.contains(&x),
@@ -167,15 +167,23 @@ fn is_path_with_extension<P: AsRef<Path>>(p: &P, extensions: [&str; 2]) -> bool 
 }
 
 /// The set of file extensions to treat as GZIPPED
-const GZIP_EXTENSIONS: [&str; 2] = ["gz", "bgz"];
+const GZIP_EXTENSIONS: &[&str] = &["gz", "bgz"];
 
 /// Returns true if the path ends with a recognized GZIP file extension
 pub fn is_gzip_path<P: AsRef<Path>>(p: &P) -> bool {
     is_path_with_extension(p, GZIP_EXTENSIONS)
 }
 
+/// The set of file extensions to treat as zstandard compressed
+const ZSTD_EXTENSIONS: &[&str] = &["zst", "zstd"];
+
+/// Returns true if the path ends with a recognized zstandard file extension
+pub fn is_zstd_path<P: AsRef<Path>>(p: &P) -> bool {
+    is_path_with_extension(p, ZSTD_EXTENSIONS)
+}
+
 /// The set of file extensions to treat as FASTQ
-const FASTQ_EXTENSIONS: [&str; 2] = ["fastq", "fq"];
+const FASTQ_EXTENSIONS: &[&str] = &["fastq", "fq"];
 
 /// Returns true if the path ends with a recognized FASTQ file extension
 pub fn is_fastq_path<P: AsRef<Path>>(p: &P) -> bool {
@@ -217,6 +225,22 @@ pub mod tests {
         let result = is_gzip_path(&file_path);
         assert_eq!(result, expected);
     }
+    // ############################################################################################
+    // Tests is_zstd_path()
+    // ############################################################################################
+
+    #[rstest]
+    #[case("test_fastq.fq.zst", true)] // .fq.zst is valid zstd
+    #[case("test_fastq.fq.zstd", true)] // .fq.zstd is valid zstd
+    #[case("test_fastq.fq.gz", false)] // .fq.gz is not zstd
+    #[case("test_fastq.fq", false)] // .fq is not zstd
+    fn test_is_zstd_path(#[case] file_name: &str, #[case] expected: bool) {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join(file_name);
+        let result = is_zstd_path(&file_path);
+        assert_eq!(result, expected);
+    }
+
     // ############################################################################################
     // Tests is_fastq_path()
     // ############################################################################################
